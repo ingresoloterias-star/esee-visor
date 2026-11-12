@@ -2,6 +2,8 @@
 config.json
 passkeys.json
 camera-settings.json
+actions.json
+ewelink.json
 
 bin/
 capturas/

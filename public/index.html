@@ -47,6 +47,15 @@
   #ptzSpeed { display:block; width:100%; margin:18px 0 8px; accent-color:var(--accent); touch-action:pan-x; }
   #ptzSpeedScale { display:flex; justify-content:space-between; color:var(--dim); font-size:12px; }
   #camSettingsNote { margin:18px 0 0; color:var(--dim); font-size:13px; }
+  #eweSection { margin-top:20px; border-top:1px solid rgba(255,255,255,.1); padding-top:18px; }
+  #eweTitle { font-weight:600; margin-bottom:10px; }
+  #eweStatus { color:var(--dim); font-size:13px; margin-bottom:12px; }
+  #eweStatus a { color:var(--accent); }
+  #eweConfig { display:none; flex-direction:column; gap:12px; }
+  .eweField { display:flex; flex-direction:column; gap:5px; font-size:13px; color:var(--dim); }
+  .eweField select, .eweField input { font:15px system-ui,sans-serif; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  #eweButtons { display:flex; gap:8px; margin-top:4px; }
+  #eweButtons .btn { height:42px; padding:0 16px; touch-action:manipulation; }
   #pad { position:absolute; right:max(16px,env(safe-area-inset-right)); bottom:max(16px,env(safe-area-inset-bottom)); display:grid; grid-template-columns:repeat(3,56px); grid-template-rows:repeat(3,56px); gap:6px; }
   #pad .btn { width:56px; height:56px; min-width:0; padding:0; font-size:20px; }
   #zoom { position:absolute; left:max(16px,env(safe-area-inset-left)); bottom:max(16px,env(safe-area-inset-bottom)); display:flex; gap:8px; align-items:center; }
@@ -100,6 +109,10 @@
   #faceBar span { min-width:0; }
   #ver { position:fixed; right:max(10px,env(safe-area-inset-right)); bottom:max(6px,env(safe-area-inset-bottom)); color:#aeb8c4; font-size:12px; pointer-events:none; z-index:3; background:rgba(12,15,19,.75); padding:2px 7px; border-radius:6px; }
   #single.on ~ #faceChip, #single.on ~ #ver, #single.on ~ #faceBar { display:none !important; }
+  #acts { position:absolute; left:max(12px,env(safe-area-inset-left)); top:calc(max(12px,env(safe-area-inset-top)) + 48px); display:flex; flex-direction:column; gap:8px; align-items:flex-start; z-index:2; }
+  #acts .btn { height:44px; padding:0 16px; font-size:15px; touch-action:manipulation; }
+  #acts .btn.ask { background:#ffb020; color:#221300; border-color:#ffb020; }
+  #single.rec #acts { display:none; }
   #faceChip { position:fixed; left:max(10px,env(safe-area-inset-left)); bottom:max(6px,env(safe-area-inset-bottom)); z-index:3; display:none; background:rgba(12,15,19,.85); color:var(--accent); border:1px solid rgba(62,166,255,.5); border-radius:8px; font:600 12px system-ui,sans-serif; padding:5px 10px; cursor:pointer; touch-action:manipulation; }
 </style>
 </head>
@@ -110,6 +123,7 @@
   <div class="state" id="bigState">Conectando…</div>
   <button class="btn ui" id="back" title="Volver">✕</button>
   <div id="title" class="ui"></div>
+  <div id="acts" class="ui"></div>
   <div id="top" class="ui">
     <button class="btn" id="mic" title="Hablar por el parlante de la cámara" style="display:none">Hablar</button>
     <button class="btn" id="snd" title="Sonido">Audio</button>
@@ -183,6 +197,16 @@
     <input id="ptzSpeed" type="range" min="1" max="8" step="1" value="4">
     <div id="ptzSpeedScale"><span>Lenta</span><span>Rápida</span></div>
     <p id="camSettingsNote">Se guarda para esta cámara y se comparte con los demás dispositivos.</p>
+    <div id="eweSection">
+      <div id="eweTitle">Botón para abrir (reja / portón)</div>
+      <div id="eweStatus"></div>
+      <div id="eweConfig">
+        <label class="eweField"><span>Dispositivo</span><select id="eweDevice"></select></label>
+        <label class="eweField"><span>Texto del botón</span><input id="eweLabel" type="text" maxlength="24" placeholder="Abrir reja"></label>
+        <label class="eweField"><span>Al tocar</span><select id="eweDo"><option value="pulse">Pulso (abre y suelta)</option><option value="toggle">Alternar</option><option value="on">Encender</option><option value="off">Apagar</option></select></label>
+        <div id="eweButtons"><button class="btn on" id="eweSave">Guardar botón</button><button class="btn" id="eweRemove">Quitar</button></div>
+      </div>
+    </div>
   </section>
 </div>
 <button id="faceChip">Activar Face ID</button>
@@ -426,8 +450,9 @@ function openCam(i, push = true) {
   const c = cameras[i];
   $('#title').textContent = c.name;
   $('#pad').style.display = $('#zoom').style.display = c.ptz ? '' : 'none';
-  $('#settings').style.display = c.ptz ? '' : 'none';
+  $('#settings').style.display = '';
   micStop(); $('#mic').style.display = micOK ? '' : 'none';
+  buildActions(c);
   single.classList.add('on'); playBig(); wake();
   if (push) history.pushState({ cam: i }, '');
 }
@@ -455,11 +480,58 @@ function openCameraSettings() {
   const cam = cameras[cur]; settingsChannel = cam.channel;
   savedPtzSpeed = Number.isInteger(Number(cam.ptzSpeed)) && Number(cam.ptzSpeed) >= 1 && Number(cam.ptzSpeed) <= 8 ? Number(cam.ptzSpeed) : 4;
   $('#camSettingsTitle').textContent = `Ajustes · ${cam.name}`;
+  const showPtz = !!cam.ptz;
+  $('#ptzSpeedLabel').style.display = $('#ptzSpeed').style.display = $('#ptzSpeedScale').style.display = $('#camSettingsNote').style.display = showPtz ? '' : 'none';
   ptzSpeedInput.value = String(savedPtzSpeed); ptzSpeedValue.value = String(savedPtzSpeed);
   $('#camSettingsNote').textContent = 'Se guarda para esta cámara y se comparte con los demás dispositivos.';
   camSettings.classList.add('open'); camSettings.setAttribute('aria-hidden', 'false');
+  loadEwe(cam.channel);
   $('#camSettingsClose').focus();
 }
+
+// Sección eWeLink dentro de los ajustes de la cámara: elegir el dispositivo que abre su reja/portón
+let eweCurrentId = null;
+async function loadEwe(channel) {
+  const status = $('#eweStatus'), config = $('#eweConfig');
+  config.style.display = 'none'; status.textContent = 'Cargando…';
+  let st; try { st = await (await fetch('/api/ewelink/status', { cache: 'no-store' })).json(); } catch { status.textContent = 'No se pudo consultar eWeLink.'; return; }
+  if (st.error) { status.textContent = st.error; return; }
+  if (!st.hasApp) { status.innerHTML = 'Falta cargar el APPID y el APP SECRET en el archivo <b>ewelink.json</b> del servidor. En eWeLink, registrá como dirección de redirección: <br><code style="font-size:12px;word-break:break-all">' + st.redirectUrl + '</code>'; return; }
+  if (!st.linked) { status.innerHTML = 'Cuenta de eWeLink no conectada. <a href="/ewelink/login">Conectar ahora</a>. En eWeLink, la dirección de redirección debe ser:<br><code style="font-size:12px;word-break:break-all">' + st.redirectUrl + '</code>'; return; }
+  const sel = $('#eweDevice');
+  sel.innerHTML = '<option value="">— ninguno —</option>' + st.devices.map((d) => `<option value="${d.id}">${d.name}${d.online ? '' : ' (desconectado)'}</option>`).join('');
+  let actsList = []; try { actsList = (await (await fetch('/api/actions', { cache: 'no-store' })).json()).actions || []; } catch { /* sin acciones */ }
+  const curA = actsList.find((a) => a.channel === channel);
+  eweCurrentId = curA ? curA.id : null;
+  $('#eweLabel').value = curA ? curA.label : 'Abrir reja';
+  $('#eweDo').value = curA ? curA.do : 'pulse';
+  sel.value = curA ? curA.device : '';
+  $('#eweRemove').style.display = curA ? '' : 'none';
+  status.innerHTML = 'Elegí el dispositivo eWeLink que abre la reja de <b>' + cameras.find((c) => c.channel === channel).name + '</b>. <a href="/ewelink/sync" onclick="return false" id="eweSyncLink">Actualizar lista</a>';
+  const sync = $('#eweSyncLink'); if (sync) sync.onclick = async () => { status.textContent = 'Actualizando…'; await fetch('/api/ewelink/sync', { method: 'POST' }).catch(() => {}); loadEwe(channel); };
+  config.style.display = 'flex';
+}
+async function saveEwe(removing) {
+  const channel = settingsChannel; if (channel === null) return;
+  const device = removing ? '' : $('#eweDevice').value;
+  let all = []; try { all = (await (await fetch('/api/actions', { cache: 'no-store' })).json()).actions || []; } catch { /* vacío */ }
+  all = all.filter((a) => a.channel !== channel);
+  if (device) all.push({ id: eweCurrentId || undefined, channel, device, label: $('#eweLabel').value.trim() || 'Abrir', do: $('#eweDo').value });
+  $('#eweSave').disabled = $('#eweRemove').disabled = true;
+  try {
+    const r = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(all) });
+    if (!r.ok) throw new Error();
+    const saved = (await r.json()).actions || [];
+    const cam = cameras.find((c) => c.channel === channel);
+    if (cam) cam.actions = saved.filter((a) => a.channel === channel).map((a) => ({ id: a.id, label: a.label }));
+    if (cur >= 0 && cameras[cur].channel === channel) buildActions(cameras[cur]);
+    toast(device ? 'Botón guardado' : 'Botón quitado');
+    closeCameraSettings();
+  } catch { toast('No se pudo guardar'); }
+  $('#eweSave').disabled = $('#eweRemove').disabled = false;
+}
+$('#eweSave').addEventListener('click', () => saveEwe(false));
+$('#eweRemove').addEventListener('click', () => saveEwe(true));
 $('#settings').addEventListener('click', openCameraSettings);
 $('#camSettingsClose').addEventListener('click', closeCameraSettings);
 camSettings.addEventListener('click', (e) => { if (e.target === camSettings) closeCameraSettings(); });
@@ -484,6 +556,25 @@ ptzSpeedInput.addEventListener('change', async () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && camSettings.classList.contains('open')) { e.preventDefault(); e.stopImmediatePropagation(); closeCameraSettings(); }
 }, true);
+
+// ---------- Botones de acción (abrir reja/portón por eWeLink) ----------
+let toastTimer = null;
+function toast(t, ms = 2800) { let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; el.style.cssText = 'position:fixed;left:50%;top:max(16px,env(safe-area-inset-top));transform:translateX(-50%);z-index:30;background:rgba(12,15,19,.94);border:1px solid rgba(255,255,255,.18);padding:10px 16px;border-radius:10px;font-weight:600;max-width:90vw;text-align:center'; document.body.appendChild(el); } el.textContent = t; el.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms); }
+function buildActions(c) {
+  const box = $('#acts'); box.innerHTML = '';
+  (c.actions || []).forEach((a, index) => {
+    const b = document.createElement('button'); b.className = 'btn'; b.textContent = a.label;
+    let armed = null;
+    b.addEventListener('click', async () => {
+      if (!armed) { b.classList.add('ask'); b.textContent = '¿' + a.label + '? Tocá otra vez'; armed = setTimeout(() => { armed = null; b.classList.remove('ask'); b.textContent = a.label; }, 3500); return; }
+      clearTimeout(armed); armed = null; b.classList.remove('ask'); b.textContent = a.label; b.disabled = true;
+      try { const r = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: c.channel, index }) }); const j = await r.json().catch(() => ({})); toast(r.ok ? a.label + ': hecho' : (j.error || 'No se pudo'), r.ok ? 2500 : 6000); }
+      catch { toast('Sin conexión con el servidor', 5000); }
+      b.disabled = false;
+    });
+    box.appendChild(b);
+  });
+}
 
 // ---------- Movimiento ----------
 let ptzActive = null;

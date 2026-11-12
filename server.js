@@ -204,6 +204,19 @@ function ptz(channel, action, speed) {
 const recSearch = new RecSearch(cfg);
 const talk = new (require('./lib/talk').Talk)(cfg, (...a) => log(...a));
 
+// ---------- eWeLink: botones (abrir reja/portón) asignables a la cámara que elijas ----------
+const { Ewelink } = require('./lib/ewelink');
+const ewe = new Ewelink(path.join(ROOT, 'ewelink.json'));
+const ACTIONS_FILE = path.join(ROOT, 'actions.json');
+let actions = [];
+try { actions = JSON.parse(fs.readFileSync(ACTIONS_FILE, 'utf8')); } catch { /* sin botones configurados */ }
+if (!Array.isArray(actions)) actions = [];
+const saveActions = () => fs.writeFileSync(ACTIONS_FILE, JSON.stringify(actions, null, 2) + '\n');
+const actionsFor = (ch) => actions.filter((a) => Number(a.channel) === ch);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const eweRedirect = (req) => ewe.cfg.redirectUrl || ('https://' + reqHost(req) + '/ewelink/callback');
+const ewePage = (msg) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>eWeLink</title><body style="font:16px/1.5 system-ui;background:#0b0d10;color:#e8ecf1;max-width:520px;margin:40px auto;padding:0 20px"><h2>eWeLink</h2><p>${esc(msg)}</p><p><a style="color:#3ea6ff" href="/">Volver a la app</a></p>`;
+
 // ---------- Acceso con PIN (opcional: "pin" en config.json) ----------
 const PIN = String(process.env.ESEE_PIN || cfg.pin || '');
 const SECRET = PIN ? crypto.createHmac('sha256', PIN + '|' + cfg.password).update('esee-visor').digest() : null;
@@ -369,7 +382,56 @@ const server = http.createServer(async (req, res) => {
       if (!p.endsWith('.webmanifest')) return json(res, 401, { error: 'Hace falta el PIN' });
     }
 
-    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel) })) });
+    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
+
+    // --- eWeLink: estado, conexión de la cuenta, dispositivos y configuración de botones ---
+    if (p === '/api/ewelink/status') {
+      if (!PIN) return json(res, 403, { error: 'Primero poné un PIN en config.json' });
+      return json(res, 200, { hasApp: ewe.hasApp, linked: ewe.linked, region: ewe.cfg.region || '', redirectUrl: eweRedirect(req),
+        devices: Object.entries(ewe.cfg.devices || {}).map(([id, d]) => ({ id, name: d.name, online: !!d.online, outlets: d.outlets || 0, ip: d.ip || '' })) });
+    }
+    if (p === '/ewelink/login') {
+      if (!PIN || !authed(req)) return json(res, 401, { error: 'Entrá con el PIN primero' });
+      if (!ewe.hasApp) return html(res, 200, ewePage('Falta cargar APPID y APP SECRET en el archivo ewelink.json y reiniciar.'));
+      res.writeHead(302, { Location: ewe.authUrl(eweRedirect(req)) }); return res.end();
+    }
+    if (p === '/ewelink/callback') {
+      try {
+        const d = await ewe.exchange(url.searchParams.get('code'), url.searchParams.get('region'), eweRedirect(req), url.searchParams.get('state'));
+        return html(res, 200, ewePage(`Cuenta conectada: ${Object.keys(d).length} dispositivos. Volvé a la configuración.`));
+      } catch (e) { log('eWeLink:', e.message); return html(res, 200, ewePage('No se pudo conectar la cuenta: ' + e.message)); }
+    }
+    if (p === '/api/ewelink/sync' && req.method === 'POST') {
+      if (!PIN) return json(res, 403, { error: 'Falta el PIN' });
+      try { await ewe.syncDevices(); return json(res, 200, { ok: true }); } catch (e) { return json(res, 502, { error: e.message }); }
+    }
+    if (p === '/api/actions') {
+      if (!PIN) return json(res, 403, { error: 'Primero poné un PIN en config.json' });
+      if (req.method === 'POST') {
+        let list; try { list = JSON.parse(await readBody(req, 20000)); } catch { return json(res, 400, { error: 'datos inválidos' }); }
+        if (!Array.isArray(list)) return json(res, 400, { error: 'formato inválido' });
+        const clean = [];
+        for (const a of list.slice(0, 50)) {
+          const ch = Number(a.channel), dev = String(a.device || '');
+          if (!validChannel(ch) || !dev) continue;
+          clean.push({ id: String(a.id || crypto.randomBytes(6).toString('hex')), channel: ch, label: String(a.label || 'Abrir').slice(0, 24) || 'Abrir',
+            device: dev, do: ['pulse', 'toggle', 'on', 'off'].includes(a.do) ? a.do : 'pulse',
+            outlet: a.outlet === undefined || a.outlet === null || a.outlet === '' ? undefined : Number(a.outlet),
+            seconds: a.seconds ? Math.max(0.5, Math.min(10, Number(a.seconds))) : undefined });
+        }
+        actions = clean; saveActions();
+        return json(res, 200, { ok: true, actions });
+      }
+      return json(res, 200, { actions });
+    }
+    if (p === '/api/action' && req.method === 'POST') {
+      if (!PIN) return json(res, 403, { error: 'Los botones de acción necesitan un PIN' });
+      let q = {}; try { q = JSON.parse(await readBody(req)); } catch { /* cuerpo inválido */ }
+      const a = actions.find((x) => x.id === q.id) || actionsFor(Number(q.channel))[Number(q.index)];
+      if (!a) return json(res, 404, { error: 'botón inexistente' });
+      try { const via = await ewe.run(a); log(`acción "${a.label}" ejecutada por ${via}`); return json(res, 200, { ok: true, via }); }
+      catch (e) { log(`acción "${a.label}" falló:`, e.message); return json(res, 502, { error: e.message }); }
+    }
 
     if (p === '/api/camera-settings' && req.method === 'POST') {
       let q = {}; try { q = JSON.parse(await readBody(req, 2000)); } catch { /* pedido inválido */ }
