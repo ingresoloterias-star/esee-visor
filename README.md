@@ -88,6 +88,8 @@ Requisitos: tener un PIN configurado y HTTPS (Tailscale).
 1. Creá la aplicación de desarrollador en [dev.ewelink.cc](https://dev.ewelink.cc). Como **dirección de redirección** poné la que muestra la app en Ajustes de cámara → "Botón para abrir" (algo como `https://tu-equipo.ts.net/ewelink/callback`).
 2. Pegá el **APPID** y el **APP SECRET** en el archivo `ewelink.json` del servidor y reiniciá.
 3. En la app, entrá a una cámara → ⚙ (Ajustes) → "Conectar ahora" e iniciá sesión en eWeLink (hacelo desde la PC del servidor).
+
+Algunas marcas eWeLink no aparecen en la lista general de la API. Para incluir esos equipos, agregá sus ID de dispositivo a `includeDeviceIds` en `ewelink.json`; la sincronización consulta sus datos individualmente. Los ID se obtienen en eWeLink → Ajustes del dispositivo → Información del dispositivo.
 4. En cualquier cámara, ⚙ → elegí el dispositivo, el texto del botón y qué hace (pulso / alternar / encender / apagar) → **Guardar botón**. Aparece en esa cámara.
 
 Para moverlo a otra cámara: en la cámara vieja ⚙ → **Quitar**; en la nueva ⚙ → elegí el dispositivo → Guardar. El botón pide un segundo toque antes de accionar, para no abrir por accidente. El control va primero por tu red local y, si falla, por la nube de eWeLink.
