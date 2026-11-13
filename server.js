@@ -424,6 +424,21 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, { actions });
     }
+    // Forzar actualización desde la app: busca en GitHub y, si hay versión nueva, reinicia para bajarla
+    if (p === '/api/update' && req.method === 'POST') {
+      if (!PIN) return json(res, 403, { error: 'Falta el PIN' });
+      execFile('git', ['fetch', '--quiet'], { cwd: ROOT, timeout: 60000, env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }) }, (err, out, stderr) => {
+        if (err) return json(res, 502, { error: 'No se pudo consultar GitHub: ' + String(stderr || err.message).trim().split('\n').pop() });
+        let local, remote;
+        try { local = git('rev-parse', 'HEAD'); remote = git('rev-parse', '@{u}'); } catch (e) { return json(res, 500, { error: 'No se pudo comparar versiones: ' + e.message }); }
+        if (local === remote) return json(res, 200, { updated: false, version: VERSION });
+        json(res, 200, { updated: true });
+        log('actualización forzada desde la app: reinicio para bajar la versión nueva');
+        setTimeout(() => process.exit(0), 600); // el servicio hace git pull y reinicia
+      });
+      return;
+    }
+
     if (p === '/api/action' && req.method === 'POST') {
       if (!PIN) return json(res, 403, { error: 'Los botones de acción necesitan un PIN' });
       let q = {}; try { q = JSON.parse(await readBody(req)); } catch { /* cuerpo inválido */ }

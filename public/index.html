@@ -56,6 +56,9 @@
   .eweField select, .eweField input { font:15px system-ui,sans-serif; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
   #eweButtons { display:flex; gap:8px; margin-top:4px; }
   #eweButtons .btn { height:42px; padding:0 16px; touch-action:manipulation; }
+  #updSection { margin-top:20px; border-top:1px solid rgba(255,255,255,.1); padding-top:16px; }
+  #updBtn { height:42px; padding:0 16px; touch-action:manipulation; }
+  #updMsg { color:var(--dim); font-size:13px; margin-top:8px; min-height:1.2em; }
   #pad { position:absolute; right:max(16px,env(safe-area-inset-right)); bottom:max(16px,env(safe-area-inset-bottom)); display:grid; grid-template-columns:repeat(3,56px); grid-template-rows:repeat(3,56px); gap:6px; }
   #pad .btn { width:56px; height:56px; min-width:0; padding:0; font-size:20px; }
   #zoom { position:absolute; left:max(16px,env(safe-area-inset-left)); bottom:max(16px,env(safe-area-inset-bottom)); display:flex; gap:8px; align-items:center; }
@@ -206,6 +209,10 @@
         <label class="eweField"><span>Al tocar</span><select id="eweDo"><option value="pulse">Pulso (abre y suelta)</option><option value="toggle">Alternar</option><option value="on">Encender</option><option value="off">Apagar</option></select></label>
         <div id="eweButtons"><button class="btn on" id="eweSave">Guardar botón</button><button class="btn" id="eweRemove">Quitar</button></div>
       </div>
+    </div>
+    <div id="updSection">
+      <button class="btn" id="updBtn">Buscar actualización del visor</button>
+      <div id="updMsg"></div>
     </div>
   </section>
 </div>
@@ -532,6 +539,27 @@ async function saveEwe(removing) {
 }
 $('#eweSave').addEventListener('click', () => saveEwe(false));
 $('#eweRemove').addEventListener('click', () => saveEwe(true));
+
+// Forzar actualización del servidor desde la app (sin ir a la otra PC)
+$('#updBtn').addEventListener('click', async () => {
+  const btn = $('#updBtn'), msg = $('#updMsg');
+  btn.disabled = true; msg.textContent = 'Buscando…';
+  try {
+    const r = await fetch('/api/update', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = j.error || 'No se pudo buscar.'; btn.disabled = false; return; }
+    if (!j.updated) { msg.textContent = 'Ya está en la última versión (' + (j.version || '') + ').'; btn.disabled = false; return; }
+    msg.textContent = 'Versión nueva encontrada. Actualizando y reiniciando…';
+    // el servidor se reinicia; esperamos y recargamos cuando vuelva
+    let tries = 0;
+    const waitBack = () => setTimeout(async () => {
+      tries++;
+      try { const i = await fetch('/api/info', { cache: 'no-store' }); if (i.ok || i.status === 401) { location.reload(); return; } } catch { /* todavía reiniciando */ }
+      if (tries < 30) waitBack(); else { msg.textContent = 'Reinició. Recargá la página en un momento.'; btn.disabled = false; }
+    }, 2000);
+    waitBack();
+  } catch { msg.textContent = 'Sin conexión con el servidor.'; btn.disabled = false; }
+});
 $('#settings').addEventListener('click', openCameraSettings);
 $('#camSettingsClose').addEventListener('click', closeCameraSettings);
 camSettings.addEventListener('click', (e) => { if (e.target === camSettings) closeCameraSettings(); });
