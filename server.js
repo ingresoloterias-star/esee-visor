@@ -322,15 +322,22 @@ function createClipJob(chans, start, end, includeAudio = false) {
   const expire = (delay) => { clearTimeout(job.timer); job.timer = setTimeout(() => { cleanup(); clipJobs.delete(id); }, delay); job.timer.unref?.(); };
   const fail = (message) => { if (job.status !== 'preparing') return; job.status = 'error'; job.error = message; cleanup(); expire(5 * 60 * 1000); };
 
+  const delay = (ms) => new Promise((r) => { const tm = setTimeout(r, ms); tm.unref?.(); });
   (async () => {
     const n = chans.length;
     for (let i = 0; i < n; i++) {
       const ch = chans[i];
       const file = multi ? path.join(os.tmpdir(), 'esee-part-' + id + '-' + ch + '.mp4') : job.file;
-      await prepareClip(ch, start, end, includeAudio, file, (progress) => {
-        if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
-      });
-      const size = fs.statSync(file).size;
+      let size = 0;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // Pausa entre cámaras (y antes de reintentar) para que el DVR libere la sesión de reproducción anterior.
+        if (i > 0 || attempt > 0) await delay(2000);
+        await prepareClip(ch, start, end, includeAudio, file, (progress) => {
+          if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
+        });
+        size = fs.statSync(file).size;
+        if (size >= 1000) break;
+      }
       if (size < 1000) throw new Error(multi ? `La cámara ${ch + 1} no tiene video en ese tramo` : 'No se encontró video en el tramo elegido');
       if (multi) parts.push({ path: file, name: clipFileName(ch) });
     }
