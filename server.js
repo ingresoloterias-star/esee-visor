@@ -294,9 +294,11 @@ function clipFileName(ch) {
 }
 
 // Prepara el tramo de UNA cámara a un archivo mp4. Promesa que resuelve al terminar.
-function prepareClip(ch, start, end, includeAudio, file, onProgress) {
+// register(output) expone el flujo para poder cancelarlo (destruirlo) desde afuera.
+function prepareClip(ch, start, end, includeAudio, file, onProgress, register) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(file);
+    if (register) register(output);
     const timer = setTimeout(() => output.destroy(new Error('La cámara tardó demasiado en preparar el video')), 15 * 60 * 1000);
     timer.unref?.();
     output.once('error', (e) => { clearTimeout(timer); reject(e); });
@@ -312,7 +314,7 @@ function createClipJob(chans, start, end, includeAudio = false) {
   const id = crypto.randomBytes(12).toString('hex');
   const stamp = new Date(start * 1000).toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const multi = chans.length > 1;
-  const job = { id, chans, start, end, includeAudio, progress: 0, status: 'preparing', error: '',
+  const job = { id, chans, start, end, includeAudio, progress: 0, status: 'preparing', error: '', cancelled: false, active: null,
     file: path.join(os.tmpdir(), 'esee-clip-' + id + (multi ? '.zip' : '.mp4')),
     name: multi ? `grabacion-${stamp}.zip` : `camara-${chans[0] + 1}-${stamp}.mp4`,
     mime: multi ? 'application/zip' : 'video/mp4', timer: null };
@@ -320,21 +322,24 @@ function createClipJob(chans, start, end, includeAudio = false) {
   const parts = [];
   const cleanup = () => { fs.promises.unlink(job.file).catch(() => {}); for (const pt of parts) fs.promises.unlink(pt.path).catch(() => {}); };
   const expire = (delay) => { clearTimeout(job.timer); job.timer = setTimeout(() => { cleanup(); clipJobs.delete(id); }, delay); job.timer.unref?.(); };
-  const fail = (message) => { if (job.status !== 'preparing') return; job.status = 'error'; job.error = message; cleanup(); expire(5 * 60 * 1000); };
+  const fail = (message) => { if (job.status !== 'preparing') return; if (job.cancelled) { job.status = 'cancelled'; } else { job.status = 'error'; job.error = message; } cleanup(); expire(job.cancelled ? 30000 : 5 * 60 * 1000); };
 
   const delay = (ms) => new Promise((r) => { const tm = setTimeout(r, ms); tm.unref?.(); });
   (async () => {
     const n = chans.length;
     for (let i = 0; i < n; i++) {
+      if (job.cancelled) throw new Error('cancelado');
       const ch = chans[i];
       const file = multi ? path.join(os.tmpdir(), 'esee-part-' + id + '-' + ch + '.mp4') : job.file;
       let size = 0;
       for (let attempt = 0; attempt < 2; attempt++) {
+        if (job.cancelled) throw new Error('cancelado');
         // Pausa entre cámaras (y antes de reintentar) para que el DVR libere la sesión de reproducción anterior.
         if (i > 0 || attempt > 0) await delay(2000);
         await prepareClip(ch, start, end, includeAudio, file, (progress) => {
           if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
-        });
+        }, (o) => { job.active = o; });
+        job.active = null;
         size = fs.statSync(file).size;
         if (size >= 1000) break;
       }
@@ -348,6 +353,12 @@ function createClipJob(chans, start, end, includeAudio = false) {
   })().catch((e) => fail(e.message || 'No se pudo preparar el video'));
 
   return job;
+}
+
+// Cancela una preparación en curso: corta la sesión del DVR para liberarlo enseguida.
+function cancelClipJob(id) {
+  const job = clipJobs.get(id);
+  if (job && job.status === 'preparing') { job.cancelled = true; if (job.active) try { job.active.destroy(new Error('cancelado')); } catch { /* ya cerrado */ } }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -552,6 +563,10 @@ const server = http.createServer(async (req, res) => {
       const job = clipJobs.get(url.searchParams.get('id'));
       if (!job) return json(res, 404, { error: 'La preparación venció; volvé a intentarlo' });
       return json(res, 200, { status: job.status, progress: job.progress, error: job.error });
+    }
+    if (p === '/api/rec/export/cancel' && req.method === 'POST') {
+      cancelClipJob(url.searchParams.get('id'));
+      return json(res, 200, { ok: true });
     }
     if (p === '/api/rec/export/file') {
       const job = clipJobs.get(url.searchParams.get('id'));

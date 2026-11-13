@@ -109,6 +109,12 @@
   .clipCamRow span { flex:1; }
   #clipCamsFoot { display:flex; gap:8px; justify-content:flex-end; }
   #clipCamsAll { margin-right:auto; }
+  #clipBusy { position:fixed; inset:0; z-index:17; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(0,0,0,.82); }
+  #clipBusy.open { display:flex; }
+  #clipBusyPanel { width:min(340px,100%); padding:22px 20px; border:1px solid rgba(255,255,255,.16); border-radius:16px; background:#14181d; box-shadow:0 18px 60px rgba(0,0,0,.55); text-align:center; }
+  #clipBusyText { font-weight:650; font-size:16px; margin-bottom:12px; }
+  #clipBusyProgress { width:100%; height:12px; accent-color:var(--accent); }
+  #clipBusyHint { color:var(--dim); font-size:12.5px; margin:12px 0 16px; }
   #clipAudio { display:inline-flex; align-items:center; gap:5px; color:var(--dim); font-size:12px; white-space:nowrap; }
   #clipAudio input { width:18px; height:18px; margin:0; accent-color:var(--accent); }
   #lock { position:fixed; inset:0; background:var(--bg); z-index:20; display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
@@ -212,6 +218,14 @@
       <button class="btn sm" id="clipCamsCancel">Cancelar</button>
       <button class="btn sm" id="clipCamsGo">Descargar</button>
     </div>
+  </section>
+</div>
+<div id="clipBusy" aria-hidden="true">
+  <section id="clipBusyPanel" role="dialog" aria-modal="true">
+    <div id="clipBusyText">Preparando…</div>
+    <progress id="clipBusyProgress" max="100" value="0"></progress>
+    <p id="clipBusyHint">Dejá esta pantalla abierta: el DVR está preparando el video y conviene no pedirle otra cosa mientras tanto.</p>
+    <button class="btn sm" id="clipBusyCancel">Cancelar</button>
   </section>
 </div>
 <div id="camSettings" aria-hidden="true">
@@ -742,6 +756,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) micSt
 // ---------- Teclado / control remoto ----------
 const KEY_PTZ = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', '+': 'zoomIn', '=': 'zoomIn', '-': 'zoomOut', MediaFastForward: 'zoomIn', MediaRewind: 'zoomOut', PageUp: 'zoomIn', PageDown: 'zoomOut' };
 window.addEventListener('keydown', (e) => {
+  if ($('#clipBusy').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') clipCancel(); e.preventDefault(); return; }
   if ($('#clipCams').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); clipCamsClose(); } return; }
   if (camSettings.classList.contains('open')) return;
   if (cur >= 0 && rec.on) { recKey(e); return; }
@@ -882,33 +897,48 @@ $('#clipCamsGo').addEventListener('click', () => {
   clipDownload(chans);
 });
 
+// Mientras el DVR prepara la descarga conviene no pedirle nada más (reproducir, buscar):
+// una sola sesión a la vez. Por eso se pausa la reproducción y se bloquea la pantalla hasta terminar.
+let clipAbort = null, clipJobId = null;
+function clipBusy(text) { $('#clipBusyText').textContent = text; $('#clipBusyProgress').value = 0; $('#clipBusy').classList.add('open'); $('#clipBusy').setAttribute('aria-hidden', 'false'); }
+function clipBusyClose() { $('#clipBusy').classList.remove('open'); $('#clipBusy').setAttribute('aria-hidden', 'true'); }
+function clipCancel() {
+  if (clipAbort) { clipAbort.abort(); clipAbort = null; }
+  if (clipJobId) { fetch('/api/rec/export/cancel?id=' + encodeURIComponent(clipJobId), { method: 'POST' }).catch(() => {}); clipJobId = null; }
+}
+
 async function clipDownload(chans) {
-  if ($('#clipDownload').disabled) return;
+  if ($('#clipDownload').disabled || clipAbort) return;
   if (!chans || !chans.length) chans = [cameras[cur].channel];
   const multi = chans.length > 1;
-  const btn = $('#clipDownload'), status = $('#clipStatus'), progress = $('#clipProgress');
-  btn.disabled = true; progress.hidden = true; progress.value = 0;
-  status.textContent = multi ? `Preparando ${chans.length} cámaras…` : 'Preparando el video…';
+  const btn = $('#clipDownload'), status = $('#clipStatus'), progress = $('#clipBusyProgress');
+  const resumeAt = rec.cursor;
+  if (rec.abort) rec.abort.abort(); // soltar la reproducción para que el DVR se dedique a la descarga
+  bigV.pause();
+  const ac = clipAbort = new AbortController();
+  btn.disabled = true; status.textContent = '';
+  clipBusy(multi ? `Preparando ${chans.length} cámaras…` : 'Preparando el video…');
   try {
     const withAudio = $('#clipWithAudio').checked;
-    const started = await fetch('/api/rec/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chans, start: rec.clipStart, end: rec.clipEnd, audio: withAudio }), cache: 'no-store' });
+    const started = await fetch('/api/rec/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chans, start: rec.clipStart, end: rec.clipEnd, audio: withAudio }), cache: 'no-store', signal: ac.signal });
     if (!started.ok) { let message = 'No se pudo iniciar la preparación'; try { message = (await started.json()).error || message; } catch {} throw new Error(message); }
-    const { id } = await started.json();
-    progress.hidden = false;
+    const { id } = await started.json(); clipJobId = id;
     let job;
     do {
       await sleep(500);
-      const check = await fetch('/api/rec/export/status?id=' + encodeURIComponent(id), { cache: 'no-store' });
+      if (ac.signal.aborted) throw new DOMException('cancelado', 'AbortError');
+      const check = await fetch('/api/rec/export/status?id=' + encodeURIComponent(id), { cache: 'no-store', signal: ac.signal });
       if (!check.ok) throw new Error('Se perdió el estado de preparación del video');
       job = await check.json();
       progress.value = job.progress || 0;
-      const base = multi ? `Preparando cámaras…` : 'Preparando el video…';
-      status.textContent = job.status === 'preparing' ? (job.progress ? `${base} ${job.progress}%` : 'Conectando con la cámara…') : 'Video preparado';
+      const base = multi ? 'Preparando cámaras…' : 'Preparando el video…';
+      $('#clipBusyText').textContent = job.status === 'preparing' ? (job.progress ? `${base} ${job.progress}%` : 'Conectando con la cámara…') : 'Video preparado';
       if (job.status === 'error') throw new Error(job.error || 'No se pudo preparar el video');
+      if (job.status === 'cancelled') throw new DOMException('cancelado', 'AbortError');
     } while (job.status !== 'ready');
 
-    status.textContent = 'Descargando… 0%'; progress.value = 0;
-    const response = await fetch('/api/rec/export/file?id=' + encodeURIComponent(id), { cache: 'no-store' });
+    $('#clipBusyText').textContent = 'Descargando… 0%'; progress.value = 0;
+    const response = await fetch('/api/rec/export/file?id=' + encodeURIComponent(id), { cache: 'no-store', signal: ac.signal });
     if (!response.ok) { let message = 'No se pudo descargar el video'; try { message = (await response.json()).error || message; } catch {} throw new Error(message); }
     const total = Number(response.headers.get('Content-Length'));
     if (!total || !response.body) throw new Error('El servidor no informó el tamaño del video');
@@ -918,7 +948,7 @@ async function clipDownload(chans) {
       if (done) break;
       chunks.push(value); loaded += value.byteLength;
       const percent = Math.min(100, Math.floor(loaded / total * 100));
-      progress.value = percent; status.textContent = `Descargando… ${percent}% (${(loaded / 1048576).toFixed(1)} MB)`;
+      progress.value = percent; $('#clipBusyText').textContent = `Descargando… ${percent}% (${(loaded / 1048576).toFixed(1)} MB)`;
     }
     if (!loaded) throw new Error('No se encontró video en ese tramo');
     const stamp = dayKey(rec.clipStart) + '-' + hms(rec.clipStart).replaceAll(':', '-');
@@ -927,10 +957,19 @@ async function clipDownload(chans) {
     const blob = new Blob(chunks, { type }), objectUrl = URL.createObjectURL(blob), a = document.createElement('a');
     a.href = objectUrl; a.download = fileName;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
-    progress.value = 100; status.textContent = 'Descarga lista · 100%';
-  } catch (e) { progress.hidden = true; status.textContent = e.message || 'No se pudo descargar el tramo'; }
-  finally { btn.disabled = !(rec.clipStart !== null && rec.clipEnd !== null && rec.clipEnd > rec.clipStart && rec.clipEnd - rec.clipStart <= 7200); }
+    clipJobId = null;
+    status.textContent = 'Descarga lista · 100%';
+  } catch (e) {
+    if (e.name === 'AbortError') { clipCancel(); status.textContent = 'Descarga cancelada'; }
+    else status.textContent = e.message || 'No se pudo descargar el tramo';
+  } finally {
+    clipAbort = null; clipJobId = null;
+    clipBusyClose();
+    btn.disabled = !(rec.clipStart !== null && rec.clipEnd !== null && rec.clipEnd > rec.clipStart && rec.clipEnd - rec.clipStart <= 7200);
+    if (rec.on && cur >= 0) recPlay(resumeAt); // reanudar la reproducción donde estaba
+  }
 }
+$('#clipBusyCancel').addEventListener('click', clipCancel);
 
 async function recPlay(t) {
   if (rec.abort) rec.abort.abort();
