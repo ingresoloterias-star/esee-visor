@@ -497,8 +497,9 @@ async function loadEwe(channel) {
   $('#eweDo').value = curA ? curA.do : 'pulse';
   sel.value = curA ? curA.device : '';
   $('#eweRemove').style.display = curA ? '' : 'none';
-  status.innerHTML = 'Elegí el dispositivo eWeLink que abre la reja de <b>' + cameras.find((c) => c.channel === channel).name + '</b>. <a href="/ewelink/sync" onclick="return false" id="eweSyncLink">Actualizar lista</a>';
-  const sync = $('#eweSyncLink'); if (sync) sync.onclick = async () => { status.textContent = 'Actualizando…'; await fetch('/api/ewelink/sync', { method: 'POST' }).catch(() => {}); loadEwe(channel); };
+  status.innerHTML = 'Elegí el dispositivo eWeLink que abre la reja de <b>' + cameras.find((c) => c.channel === channel).name + '</b>. <a href="#" id="eweSyncLink">Actualizar lista</a>';
+  const sync = $('#eweSyncLink');
+  if (sync) sync.onclick = async (e) => { e.preventDefault(); status.textContent = 'Actualizando…'; try { const r = await fetch('/api/ewelink/sync', { method: 'POST' }); if (!r.ok) { const j = await r.json().catch(() => ({})); status.textContent = j.error || 'No se pudo actualizar.'; return; } } catch { status.textContent = 'Sin conexión con el servidor.'; return; } loadEwe(channel); };
   config.style.display = 'flex';
 }
 async function saveEwe(removing) {
