@@ -15,6 +15,7 @@ Estos equipos no ofrecen RTSP ni ONVIF: solo hablan un protocolo propio ("kp2p")
 - Descarga de un tramo (marcar inicio y fin): al tocar "Descargar tramo" se elige de qué cámaras bajar ese mismo tramo. Con una cámara baja un `.mp4`; con varias, un solo `.zip` con un `.mp4` por cámara (útil cuando un evento lo toman varias cámaras).
 - Elegir qué cámaras se ven en la grilla (botón "▦ Cámaras" arriba a la derecha): de una sola hasta todas. Se guarda en cada dispositivo, así el Fire TV puede mostrar todas y el iPhone unas pocas; mostrar menos también baja la carga del DVR.
 - Posiciones guardadas (presets PTZ) por cámara (botón "◎ Pos." en la vista de una cámara): guardás la posición actual con un nombre (la cámara guarda también el zoom) y después tocás el nombre para que vaya directo ahí. Se comparten entre dispositivos.
+- Botones rápidos 1–4 arriba del zoom: en "◎ Pos." asignás cualquier posición a uno de esos botones, y después tocás el botón para ir directo a esa posición sin abrir el panel.
 - Imagen flotante (PiP) donde el navegador lo permite.
 - Se actualiza solo: el servidor baja las versiones nuevas desde GitHub y las pantallas abiertas se recargan.
 - Sin dependencias: solo hace falta Node.js 22 o más nuevo.

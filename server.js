@@ -278,6 +278,8 @@ const cameraPtzSpeed = (channel) => {
 // Posiciones guardadas (presets PTZ) de una cámara: [{ n, label }]. La posición y el zoom
 // los guarda la cámara; acá solo recordamos el número de slot y el nombre.
 const presetsFor = (channel) => (Array.isArray(cameraSettings[channel]?.presets) ? cameraSettings[channel].presets : []);
+// Botones rápidos 1..4 de una cámara: cada uno apunta al número de preset asignado (0 = sin asignar).
+const quickFor = (channel) => { const q = (cameraSettings[channel] && cameraSettings[channel].quick) || []; const out = [0, 0, 0, 0]; for (let i = 0; i < 4; i++) out[i] = Number(q[i]) || 0; return out; };
 const saveCameraSettings = () => fs.writeFileSync(CAMERA_SETTINGS_FILE, JSON.stringify(cameraSettings, null, 2) + '\n');
 
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); }
@@ -435,7 +437,7 @@ const server = http.createServer(async (req, res) => {
       if (!p.endsWith('.webmanifest')) return json(res, 401, { error: 'Hace falta el PIN' });
     }
 
-    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), presets: presetsFor(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
+    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), presets: presetsFor(c.channel), quick: quickFor(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
 
     // --- eWeLink: estado, conexión de la cuenta, dispositivos y configuración de botones ---
     if (p === '/api/ewelink/status') {
@@ -676,16 +678,28 @@ const server = http.createServer(async (req, res) => {
         list = list.filter((x) => x.n !== n).concat([{ n, label }]).sort((a, b) => a.n - b.n);
         cameraSettings[ch] = { ...(cameraSettings[ch] || {}), presets: list };
         saveCameraSettings();
-        return json(res, 200, { presets: list });
+        return json(res, 200, { presets: list, quick: quickFor(ch) });
       }
       if (op === 'clear') {
         const n = Number(q.n);
         if (!(n >= 1 && n <= 255)) return json(res, 400, { error: 'posición inválida' });
         ptz(ch, 'presetClear', 0, n);
         list = list.filter((x) => x.n !== n);
-        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), presets: list };
+        const quick = quickFor(ch).map((x) => (x === n ? 0 : x)); // sacarla de los botones rápidos
+        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), presets: list, quick };
         saveCameraSettings();
-        return json(res, 200, { presets: list });
+        return json(res, 200, { presets: list, quick });
+      }
+      if (op === 'assign') { // poner (o sacar) una posición en un botón rápido 1..4
+        const slot = Number(q.slot), n = Number(q.n) || 0;
+        if (!(slot >= 1 && slot <= 4)) return json(res, 400, { error: 'botón inválido' });
+        if (n && !list.some((x) => x.n === n)) return json(res, 400, { error: 'posición inexistente' });
+        const quick = quickFor(ch);
+        if (n) for (let i = 0; i < 4; i++) if (quick[i] === n) quick[i] = 0; // una posición en un solo botón
+        quick[slot - 1] = n;
+        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), quick };
+        saveCameraSettings();
+        return json(res, 200, { presets: list, quick });
       }
       return json(res, 400, { error: 'operación inválida' });
     }
