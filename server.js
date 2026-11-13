@@ -654,7 +654,10 @@ const server = http.createServer(async (req, res) => {
     if (!file.startsWith(path.join(ROOT, 'public') + path.sep)) { res.writeHead(403); return res.end(); }
     fs.readFile(file, (err, data) => {
       if (err) { res.writeHead(404); return res.end('no encontrado'); }
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+      // El HTML (que trae toda la app adentro) nunca se guarda en caché, así al reabrir
+      // siempre baja la versión nueva y no queda la página vieja después de actualizar.
+      const noStore = path.extname(file) === '.html';
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': noStore ? 'no-store' : 'no-cache' });
       res.end(safari && rel === 'index.html' ? safariVariant(data) : data);
     });
   } catch (e) {
