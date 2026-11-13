@@ -187,15 +187,17 @@ setInterval(() => links.forEach((l) => l.sweep()), 3000);
 
 // ---------- Movimiento (PTZ) ----------
 const ptzStopTimers = new Map();
-function ptz(channel, action, speed) {
+function ptz(channel, action, speed, preset = 0) {
   const code = PTZ[action];
   if (code === undefined) return false;
+  const isPreset = code === PTZ.presetGo || code === PTZ.presetSet || code === PTZ.presetClear;
   const link = links.find((l) => l.ready) || links[1];
-  const doIt = () => link.client && link.client.ptz(channel, code, speed, 0);
+  // En los presets el primer parámetro es el número de posición; en el movimiento, la velocidad.
+  const doIt = () => link.client && link.client.ptz(channel, code, isPreset ? preset : speed, 0);
   link.keepUntil = Date.now() + 20000;
   if (link.ready) doIt(); else { link.onReady = doIt; link.connect(); }
   clearTimeout(ptzStopTimers.get(channel));
-  if (code !== PTZ.stop && code !== PTZ.presetGo && code !== PTZ.presetSet) {
+  if (!isPreset && code !== PTZ.stop) {
     // seguro: si el control no manda "stop", frenar solo a los 6 s
     ptzStopTimers.set(channel, setTimeout(() => { if (link.client) link.client.ptz(channel, PTZ.stop, 0, 0); }, 6000));
   }
@@ -273,6 +275,10 @@ const cameraPtzSpeed = (channel) => {
   const speed = Number(cameraSettings[channel]?.ptzSpeed);
   return Number.isInteger(speed) && speed >= 1 && speed <= 8 ? speed : 4;
 };
+// Posiciones guardadas (presets PTZ) de una cámara: [{ n, label }]. La posición y el zoom
+// los guarda la cámara; acá solo recordamos el número de slot y el nombre.
+const presetsFor = (channel) => (Array.isArray(cameraSettings[channel]?.presets) ? cameraSettings[channel].presets : []);
+const saveCameraSettings = () => fs.writeFileSync(CAMERA_SETTINGS_FILE, JSON.stringify(cameraSettings, null, 2) + '\n');
 
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); }
 
@@ -429,7 +435,7 @@ const server = http.createServer(async (req, res) => {
       if (!p.endsWith('.webmanifest')) return json(res, 401, { error: 'Hace falta el PIN' });
     }
 
-    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
+    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), presets: presetsFor(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
 
     // --- eWeLink: estado, conexión de la cuenta, dispositivos y configuración de botones ---
     if (p === '/api/ewelink/status') {
@@ -646,6 +652,42 @@ const server = http.createServer(async (req, res) => {
       if (!validChannel(ch)) return json(res, 404, { error: 'canal inexistente' });
       const speed = Math.max(0, Math.min(8, Number(q.speed) || 0));
       return json(res, ptz(ch, String(q.action), speed) ? 200 : 400, { ok: true });
+    }
+
+    // Posiciones guardadas (presets PTZ): ir / guardar la posición actual / borrar.
+    if (p === '/api/preset' && req.method === 'POST') {
+      let q = {}; try { q = JSON.parse(await readBody(req, 2000)); } catch { /* pedido inválido */ }
+      const ch = Number(q.channel), op = String(q.op || '');
+      if (!validChannel(ch)) return json(res, 404, { error: 'canal inexistente' });
+      let list = presetsFor(ch).slice();
+      if (op === 'go') {
+        const n = Number(q.n);
+        if (!(n >= 1 && n <= 255)) return json(res, 400, { error: 'posición inválida' });
+        ptz(ch, 'presetGo', 0, n);
+        return json(res, 200, { ok: true });
+      }
+      if (op === 'set') {
+        let n = Number(q.n);
+        if (!(n >= 1 && n <= 255)) { const used = new Set(list.map((x) => x.n)); n = 1; while (used.has(n)) n++; }
+        if (n > 255) return json(res, 400, { error: 'No hay más lugares libres' });
+        if (list.length >= 24 && !list.some((x) => x.n === n)) return json(res, 400, { error: 'Demasiadas posiciones (máximo 24)' });
+        const label = String(q.label || '').trim().slice(0, 24) || ('Posición ' + n);
+        ptz(ch, 'presetSet', 0, n);
+        list = list.filter((x) => x.n !== n).concat([{ n, label }]).sort((a, b) => a.n - b.n);
+        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), presets: list };
+        saveCameraSettings();
+        return json(res, 200, { presets: list });
+      }
+      if (op === 'clear') {
+        const n = Number(q.n);
+        if (!(n >= 1 && n <= 255)) return json(res, 400, { error: 'posición inválida' });
+        ptz(ch, 'presetClear', 0, n);
+        list = list.filter((x) => x.n !== n);
+        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), presets: list };
+        saveCameraSettings();
+        return json(res, 200, { presets: list });
+      }
+      return json(res, 400, { error: 'operación inválida' });
     }
 
     // archivos estáticos
