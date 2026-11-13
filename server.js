@@ -9,6 +9,7 @@ const os = require('os');
 const { Kp2pClient, PTZ } = require('./lib/kp2p');
 const { Fmp4Muxer, TIMESCALE } = require('./lib/fmp4');
 const { RecSearch, replay, dvrNow } = require('./lib/recordings');
+const { buildZip } = require('./lib/zip');
 const crypto = require('crypto');
 
 const ROOT = __dirname;
@@ -285,33 +286,60 @@ function safariVariant(data) {
   return data.toString('utf8').replace(/^[ \t]*<meta name="(apple-)?mobile-web-app-capable"[^>]*>\r?\n/gm, '').replace('manifest.webmanifest', 'manifest-safari.webmanifest');
 }
 
-function createClipJob(ch, start, end, includeAudio = false) {
+// Nombre de archivo (dentro del ZIP) a partir del nombre de la cámara, sin caracteres raros.
+function clipFileName(ch) {
+  const c = cams.cameras.find((x) => x.channel === ch);
+  const base = String(c && c.name ? c.name : 'camara ' + (ch + 1)).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return `${base || 'camara ' + (ch + 1)} (cam ${ch + 1}).mp4`;
+}
+
+// Prepara el tramo de UNA cámara a un archivo mp4. Promesa que resuelve al terminar.
+function prepareClip(ch, start, end, includeAudio, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(file);
+    const timer = setTimeout(() => output.destroy(new Error('La cámara tardó demasiado en preparar el video')), 15 * 60 * 1000);
+    timer.unref?.();
+    output.once('error', (e) => { clearTimeout(timer); reject(e); });
+    output.once('close', () => { clearTimeout(timer); if (!output.writableFinished) reject(new Error('Se interrumpió la preparación del video')); });
+    output.once('finish', () => { clearTimeout(timer); resolve(); });
+    replay(cfg, ch, start, output, log, end, onProgress, includeAudio);
+  });
+}
+
+// Prepara el mismo tramo de una o varias cámaras. Con una cámara el resultado es un mp4;
+// con varias, un ZIP con un mp4 por cámara (una sola descarga para el iPhone/Fire TV).
+function createClipJob(chans, start, end, includeAudio = false) {
   const id = crypto.randomBytes(12).toString('hex');
   const stamp = new Date(start * 1000).toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const job = { id, ch, start, end, includeAudio, progress: 0, status: 'preparing', error: '', file: path.join(os.tmpdir(), 'esee-clip-' + id + '.mp4'), name: `camara-${ch}-${stamp}.mp4`, timer: null };
+  const multi = chans.length > 1;
+  const job = { id, chans, start, end, includeAudio, progress: 0, status: 'preparing', error: '',
+    file: path.join(os.tmpdir(), 'esee-clip-' + id + (multi ? '.zip' : '.mp4')),
+    name: multi ? `grabacion-${stamp}.zip` : `camara-${chans[0] + 1}-${stamp}.mp4`,
+    mime: multi ? 'application/zip' : 'video/mp4', timer: null };
   clipJobs.set(id, job);
-  const output = fs.createWriteStream(job.file);
-  const expire = (delay) => {
-    clearTimeout(job.timer);
-    job.timer = setTimeout(() => { fs.promises.unlink(job.file).catch(() => {}); clipJobs.delete(id); }, delay);
-    job.timer.unref?.();
-  };
-  const fail = (message) => {
-    if (job.status !== 'preparing') return;
-    job.status = 'error'; job.error = message; expire(5 * 60 * 1000);
-  };
-  output.once('error', (e) => fail(e.message));
-  output.once('close', () => { if (!output.writableFinished) fail('Se interrumpió la preparación del video'); });
-  output.once('finish', () => {
-    try {
-      const size = fs.statSync(job.file).size;
-      if (size < 1000) return fail('No se encontró video en el tramo elegido');
-      job.size = size; job.progress = 100; job.status = 'ready'; expire(15 * 60 * 1000);
-    } catch (e) { fail(e.message); }
-  });
-  job.timer = setTimeout(() => output.destroy(new Error('La cámara tardó demasiado en preparar el video')), 15 * 60 * 1000);
-  job.timer.unref?.();
-  replay(cfg, ch, start, output, log, end, (progress) => { if (job.status === 'preparing') job.progress = Math.max(job.progress, Math.floor(progress)); }, includeAudio);
+  const parts = [];
+  const cleanup = () => { fs.promises.unlink(job.file).catch(() => {}); for (const pt of parts) fs.promises.unlink(pt.path).catch(() => {}); };
+  const expire = (delay) => { clearTimeout(job.timer); job.timer = setTimeout(() => { cleanup(); clipJobs.delete(id); }, delay); job.timer.unref?.(); };
+  const fail = (message) => { if (job.status !== 'preparing') return; job.status = 'error'; job.error = message; cleanup(); expire(5 * 60 * 1000); };
+
+  (async () => {
+    const n = chans.length;
+    for (let i = 0; i < n; i++) {
+      const ch = chans[i];
+      const file = multi ? path.join(os.tmpdir(), 'esee-part-' + id + '-' + ch + '.mp4') : job.file;
+      await prepareClip(ch, start, end, includeAudio, file, (progress) => {
+        if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
+      });
+      const size = fs.statSync(file).size;
+      if (size < 1000) throw new Error(multi ? `La cámara ${ch + 1} no tiene video en ese tramo` : 'No se encontró video en el tramo elegido');
+      if (multi) parts.push({ path: file, name: clipFileName(ch) });
+    }
+    if (multi) { await buildZip(parts, job.file); for (const pt of parts) fs.promises.unlink(pt.path).catch(() => {}); parts.length = 0; }
+    const size = fs.statSync(job.file).size;
+    if (size < 1000) throw new Error('No se encontró video en el tramo elegido');
+    job.size = size; job.progress = 100; job.status = 'ready'; expire(15 * 60 * 1000);
+  })().catch((e) => fail(e.message || 'No se pudo preparar el video'));
+
   return job;
 }
 
@@ -507,9 +535,10 @@ const server = http.createServer(async (req, res) => {
     // Descargar un tramo como MP4: /api/rec/export?ch=0&start=<segundos DVR>&end=<segundos DVR>
     if (p === '/api/rec/export' && req.method === 'POST') {
       let q = {}; try { q = JSON.parse(await readBody(req, 2000)); } catch { /* pedido inválido */ }
-      const ch = Number(q.ch), start = Number(q.start), end = Number(q.end);
-      if (!validChannel(ch) || !Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start || end - start > 7200 || end > dvrNow()) return json(res, 400, { error: 'Tramo inválido (máximo 2 horas)' });
-      const job = createClipJob(ch, start, end, q.audio === true);
+      const chans = [...new Set((Array.isArray(q.chans) ? q.chans : [q.ch]).map(Number))];
+      const start = Number(q.start), end = Number(q.end);
+      if (!chans.length || chans.length > 16 || !chans.every(validChannel) || !Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start || end - start > 7200 || end > dvrNow()) return json(res, 400, { error: 'Tramo inválido (máximo 2 horas)' });
+      const job = createClipJob(chans, start, end, q.audio === true);
       return json(res, 202, { id: job.id });
     }
     if (p === '/api/rec/export/status') {
@@ -520,7 +549,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/rec/export/file') {
       const job = clipJobs.get(url.searchParams.get('id'));
       if (!job || job.status !== 'ready') return json(res, 404, { error: 'El video todavía no está listo' });
-      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': job.size, 'Content-Disposition': `attachment; filename="${job.name}"`, 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+      res.writeHead(200, { 'Content-Type': job.mime || 'video/mp4', 'Content-Length': job.size, 'Content-Disposition': `attachment; filename="${job.name}"`, 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
       res.socket.setNoDelay(true);
       const input = fs.createReadStream(job.file);
       input.once('error', (e) => { log('descarga de grabación:', e.message); res.destroy(e); });

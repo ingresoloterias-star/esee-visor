@@ -97,6 +97,18 @@
   #clipTools { color:var(--dim); font-size:12px; }
   #clipStatus { color:var(--accent); }
   #clipProgress { width:120px; height:10px; accent-color:var(--accent); vertical-align:middle; }
+  #clipCams { position:fixed; inset:0; z-index:16; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(0,0,0,.72); }
+  #clipCams.open { display:flex; }
+  #clipCamsPanel { width:min(360px,100%); max-height:88vh; display:flex; flex-direction:column; padding:18px; border:1px solid rgba(255,255,255,.16); border-radius:16px; background:#14181d; box-shadow:0 18px 60px rgba(0,0,0,.55); }
+  #clipCamsPanel h2 { font-size:17px; margin:0 0 4px; }
+  #clipCamsPanel p { color:var(--dim); font-size:13px; margin:0 0 12px; }
+  #clipCamsList { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; overflow:auto; }
+  .clipCamRow { display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid rgba(255,255,255,.14); border-radius:11px; cursor:pointer; font-size:15px; }
+  .clipCamRow.pick { border-color:var(--accent); background:rgba(62,166,255,.1); }
+  .clipCamRow input { width:20px; height:20px; margin:0; accent-color:var(--accent); flex:none; }
+  .clipCamRow span { flex:1; }
+  #clipCamsFoot { display:flex; gap:8px; justify-content:flex-end; }
+  #clipCamsAll { margin-right:auto; }
   #clipAudio { display:inline-flex; align-items:center; gap:5px; color:var(--dim); font-size:12px; white-space:nowrap; }
   #clipAudio input { width:18px; height:18px; margin:0; accent-color:var(--accent); }
   #lock { position:fixed; inset:0; background:var(--bg); z-index:20; display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
@@ -188,6 +200,18 @@
   <section id="datePickerPanel" role="dialog" aria-modal="true" aria-labelledby="datePickerMonth">
     <div id="datePickerHead"><button class="btn sm" id="datePrevMonth" aria-label="Mes anterior">◀</button><span id="datePickerMonth"></span><button class="btn sm" id="dateNextMonth" aria-label="Mes siguiente">▶</button><button class="btn sm" id="datePickerClose" aria-label="Cerrar calendario">✕</button></div>
     <div id="datePickerGrid"></div>
+  </section>
+</div>
+<div id="clipCams" aria-hidden="true">
+  <section id="clipCamsPanel" role="dialog" aria-modal="true" aria-labelledby="clipCamsTitle">
+    <h2 id="clipCamsTitle">¿De qué cámaras?</h2>
+    <p id="clipCamsRange">Mismo tramo elegido</p>
+    <div id="clipCamsList"></div>
+    <div id="clipCamsFoot">
+      <button class="btn sm" id="clipCamsAll">Todas</button>
+      <button class="btn sm" id="clipCamsCancel">Cancelar</button>
+      <button class="btn sm" id="clipCamsGo">Descargar</button>
+    </div>
   </section>
 </div>
 <div id="camSettings" aria-hidden="true">
@@ -718,6 +742,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) micSt
 // ---------- Teclado / control remoto ----------
 const KEY_PTZ = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', '+': 'zoomIn', '=': 'zoomIn', '-': 'zoomOut', MediaFastForward: 'zoomIn', MediaRewind: 'zoomOut', PageUp: 'zoomIn', PageDown: 'zoomOut' };
 window.addEventListener('keydown', (e) => {
+  if ($('#clipCams').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); clipCamsClose(); } return; }
   if (camSettings.classList.contains('open')) return;
   if (cur >= 0 && rec.on) { recKey(e); return; }
   if (cur >= 0) {
@@ -826,13 +851,47 @@ function clipUpdate() {
   $('#clipStatus').textContent = rec.clipStart !== null && rec.clipEnd !== null && rec.clipEnd > rec.clipStart && rec.clipEnd - rec.clipStart > 7200 ? 'Máximo 2 horas' : '';
 }
 
-async function clipDownload() {
+// Al tocar "Descargar tramo" se elige de qué cámaras bajar el mismo tramo.
+// Con una sola cámara llega un mp4; con varias, un ZIP con un mp4 por cámara.
+function clipCamsClose() { $('#clipCams').classList.remove('open'); $('#clipCams').setAttribute('aria-hidden', 'true'); }
+function openClipCams() {
   if ($('#clipDownload').disabled) return;
+  const list = $('#clipCamsList'); list.innerHTML = '';
+  $('#clipCamsRange').textContent = dayKey(rec.clipStart).slice(5) + ' ' + hms(rec.clipStart) + ' → ' + hms(rec.clipEnd);
+  cameras.forEach((c) => {
+    const row = document.createElement('label'); row.className = 'clipCamRow';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = c.channel; cb.checked = c.channel === cameras[cur].channel;
+    const name = document.createElement('span'); name.textContent = c.name;
+    row.appendChild(cb); row.appendChild(name); list.appendChild(row);
+    const paint = () => row.classList.toggle('pick', cb.checked);
+    cb.addEventListener('change', paint); paint();
+  });
+  $('#clipCams').classList.add('open'); $('#clipCams').setAttribute('aria-hidden', 'false');
+}
+$('#clipCamsCancel').addEventListener('click', clipCamsClose);
+$('#clipCams').addEventListener('click', (e) => { if (e.target.id === 'clipCams') clipCamsClose(); });
+$('#clipCamsAll').addEventListener('click', () => {
+  const boxes = [...$('#clipCamsList').querySelectorAll('input')];
+  const turnOn = boxes.some((b) => !b.checked);
+  boxes.forEach((b) => { b.checked = turnOn; b.dispatchEvent(new Event('change')); });
+});
+$('#clipCamsGo').addEventListener('click', () => {
+  const chans = [...$('#clipCamsList').querySelectorAll('input:checked')].map((b) => Number(b.value));
+  if (!chans.length) { $('#clipCamsRange').textContent = 'Elegí al menos una cámara'; return; }
+  clipCamsClose();
+  clipDownload(chans);
+});
+
+async function clipDownload(chans) {
+  if ($('#clipDownload').disabled) return;
+  if (!chans || !chans.length) chans = [cameras[cur].channel];
+  const multi = chans.length > 1;
   const btn = $('#clipDownload'), status = $('#clipStatus'), progress = $('#clipProgress');
-  btn.disabled = true; progress.hidden = true; progress.value = 0; status.textContent = 'Preparando el video…';
+  btn.disabled = true; progress.hidden = true; progress.value = 0;
+  status.textContent = multi ? `Preparando ${chans.length} cámaras…` : 'Preparando el video…';
   try {
     const withAudio = $('#clipWithAudio').checked;
-    const started = await fetch('/api/rec/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ch: cameras[cur].channel, start: rec.clipStart, end: rec.clipEnd, audio: withAudio }), cache: 'no-store' });
+    const started = await fetch('/api/rec/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chans, start: rec.clipStart, end: rec.clipEnd, audio: withAudio }), cache: 'no-store' });
     if (!started.ok) { let message = 'No se pudo iniciar la preparación'; try { message = (await started.json()).error || message; } catch {} throw new Error(message); }
     const { id } = await started.json();
     progress.hidden = false;
@@ -843,7 +902,8 @@ async function clipDownload() {
       if (!check.ok) throw new Error('Se perdió el estado de preparación del video');
       job = await check.json();
       progress.value = job.progress || 0;
-      status.textContent = job.status === 'preparing' ? (job.progress ? `Preparando el video… ${job.progress}%` : 'Conectando con la cámara…') : 'Video preparado';
+      const base = multi ? `Preparando cámaras…` : 'Preparando el video…';
+      status.textContent = job.status === 'preparing' ? (job.progress ? `${base} ${job.progress}%` : 'Conectando con la cámara…') : 'Video preparado';
       if (job.status === 'error') throw new Error(job.error || 'No se pudo preparar el video');
     } while (job.status !== 'ready');
 
@@ -861,8 +921,11 @@ async function clipDownload() {
       progress.value = percent; status.textContent = `Descargando… ${percent}% (${(loaded / 1048576).toFixed(1)} MB)`;
     }
     if (!loaded) throw new Error('No se encontró video en ese tramo');
-    const blob = new Blob(chunks, { type: 'video/mp4' }), objectUrl = URL.createObjectURL(blob), a = document.createElement('a');
-    a.href = objectUrl; a.download = `camara-${cameras[cur].channel}-${dayKey(rec.clipStart)}-${hms(rec.clipStart).replaceAll(':','-')}${withAudio ? '-audio' : ''}.mp4`;
+    const stamp = dayKey(rec.clipStart) + '-' + hms(rec.clipStart).replaceAll(':', '-');
+    const type = multi ? 'application/zip' : 'video/mp4';
+    const fileName = multi ? `grabacion-${stamp}-${chans.length}camaras.zip` : `camara-${chans[0] + 1}-${stamp}${withAudio ? '-audio' : ''}.mp4`;
+    const blob = new Blob(chunks, { type }), objectUrl = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = objectUrl; a.download = fileName;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     progress.value = 100; status.textContent = 'Descarga lista · 100%';
   } catch (e) { progress.hidden = true; status.textContent = e.message || 'No se pudo descargar el tramo'; }
@@ -1084,7 +1147,7 @@ $('#dateNextMonth').addEventListener('click', () => { if (++calMonth > 11) { cal
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#datePicker').classList.contains('open')) { e.preventDefault(); datePickerClose(); } });
 $('#clipStart').addEventListener('click', () => { rec.clipStart = recWall(); $('#clipStatus').textContent = ''; clipUpdate(); });
 $('#clipEnd').addEventListener('click', () => { rec.clipEnd = recWall(); $('#clipStatus').textContent = ''; clipUpdate(); });
-$('#clipDownload').addEventListener('click', clipDownload);
+$('#clipDownload').addEventListener('click', () => openClipCams());
 // arrastrar sobre la línea de tiempo
 function tlTime(e) { const r = tl.getBoundingClientRect(), [w0, span] = recWindow(); return w0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * span; }
 tl.addEventListener('pointerdown', (e) => { e.preventDefault(); tl.setPointerCapture(e.pointerId); rec.scrubW0 = recWindow()[0]; rec.pendingT = tlTime(e); recDraw(); });
