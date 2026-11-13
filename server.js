@@ -319,7 +319,8 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   // Por defecto la página se sirve en "variante Safari" (sin modo app), así el ícono de inicio del iPhone abre en Safari.
   // Con ?app=1 se sirve con modo app (pantalla completa, sin PiP). /safari queda por compatibilidad.
-  const safari = url.pathname === '/safari' || ((url.pathname === '/' || url.pathname === '/index.html') && url.searchParams.get('app') !== '1');
+  // El ícono de inicio abre como app (pantalla completa). /safari queda para quien prefiera abrir en Safari.
+  const safari = url.pathname === '/safari';
   const p = safari ? '/' : url.pathname;
   let m;
   try {

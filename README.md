@@ -40,7 +40,7 @@ Abrí esa dirección en el navegador del dispositivo.
 
 - **Amazon Fire TV**: con el navegador Silk. Guardala en favoritos.
 - **iPhone / iPad**: en Safari, Compartir → "Agregar a inicio" para tenerla como app a pantalla completa.
-  - iOS no permite la imagen flotante (PiP) en apps web a pantalla completa, así que el ícono de inicio abre en Safari (con PiP, pero con las barras del navegador). iOS decide eso al crear el ícono: los creados con versiones anteriores siguen en modo app y muestran un botón "Abrir en Safari"; para que abran solos, borralos y agregalos de nuevo. Si preferís el modo app (pantalla completa, sin PiP), agregá a inicio la dirección con `?app=1` al final (por ejemplo `https://nombre-pc.tu-red.ts.net/?app=1`).
+  - El ícono abre como app a pantalla completa. iOS no permite la imagen flotante (PiP) en ese modo; para usar PiP, tocá el botón **PiP** cuatro veces seguidas y la cámara se abre en Safari (ahí sí anda PiP). Si preferís tener siempre Safari, agregá a inicio la dirección terminada en `/safari`.
 
 | Tecla / control | En la grilla | En una cámara |
 |---|---|---|

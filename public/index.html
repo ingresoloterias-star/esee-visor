@@ -222,23 +222,6 @@
 <div id="ver"></div>
 
 <script>
-// Ícono viejo en modo app (iPhone/iPad): iOS no deja saltar a Safari sin un toque. Mostramos SOLO una
-// pantalla con un botón; al tocarlo abre en Safari, y el Face ID se pide una vez ahí (no acá).
-// __goSafari evita que la app arranque y pida Face ID en este modo.
-if (navigator.standalone === true && /iPhone|iPad/.test(navigator.userAgent) && location.protocol === 'https:' && !/[?&]app=1/.test(location.search)) {
-  window.__goSafari = true;
-  const go = () => { location.href = 'x-safari-https://' + location.host + location.pathname + location.search + location.hash; };
-  const render = () => {
-    const d = document.createElement('div');
-    d.style.cssText = 'position:fixed;inset:0;z-index:100;background:#0b0d10;color:#e8ecf1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:28px;text-align:center;font:16px/1.45 system-ui,-apple-system,sans-serif';
-    d.innerHTML = '<div style="font-size:21px;font-weight:600">Cámaras</div><button id="goSafari" style="font:600 18px system-ui,sans-serif;padding:16px 32px;border-radius:14px;border:0;background:#3ea6ff;color:#001a33">Abrir en Safari</button><div style="color:#8b96a3;font-size:13px;max-width:320px">Para que abra en Safari sin este paso, borrá este ícono y volvé a agregarlo a inicio desde Safari.</div>';
-    document.body.appendChild(d);
-    d.querySelector('#goSafari').addEventListener('click', go);
-  };
-  if (document.body) render(); else document.addEventListener('DOMContentLoaded', render);
-}
-</script>
-<script>
 'use strict';
 const $ = (s) => document.querySelector(s);
 const MS = window.ManagedMediaSource || window.MediaSource;
@@ -1225,8 +1208,7 @@ setInterval(() => {
   fetch("/api/diag", { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {});
 }, 5000);
 setInterval(async () => { try { const i = await info(); if (version && i.version !== version) location.reload(); else if (!camSettings.classList.contains('open')) cameras = i.cameras; } catch (e) {} }, 60000);
-if (window.__goSafari) { /* en modo app viejo mostramos solo el salto a Safari; la app no arranca acá */ }
-else if (lockNeeded()) { $('#lock').classList.add('on'); unlock(); } else boot();
+if (lockNeeded()) { $('#lock').classList.add('on'); unlock(); } else boot();
 </script>
 </body>
 </html>

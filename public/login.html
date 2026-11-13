@@ -28,20 +28,6 @@
   <div id="e"></div>
 </form>
 <script>
-// Ícono viejo en modo app (iPhone/iPad): mostrar SOLO el salto a Safari, sin pedir Face ID ni PIN acá
-// (el Face ID se pide una vez, ya en Safari). __goSafari corta el resto de esta página.
-if (navigator.standalone === true && /iPhone|iPad/.test(navigator.userAgent) && location.protocol === 'https:' && !/[?&]app=1/.test(location.search)) {
-  window.__goSafari = true;
-  const go = () => { location.href = 'x-safari-https://' + location.host + location.pathname + location.search + location.hash; };
-  const render = () => {
-    const d = document.createElement('div');
-    d.style.cssText = 'position:fixed;inset:0;z-index:100;background:#0b0d10;color:#e8ecf1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:28px;text-align:center;font:16px/1.45 system-ui,-apple-system,sans-serif';
-    d.innerHTML = '<div style="font-size:21px;font-weight:600">Cámaras</div><button id="goSafari" style="font:600 18px system-ui,sans-serif;padding:16px 32px;border-radius:14px;border:0;background:#3ea6ff;color:#001a33">Abrir en Safari</button><div style="color:#8b96a3;font-size:13px;max-width:320px">Para que abra en Safari sin este paso, borrá este ícono y volvé a agregarlo a inicio desde Safari.</div>';
-    document.body.appendChild(d);
-    d.querySelector('#goSafari').addEventListener('click', go);
-  };
-  if (document.body) render(); else document.addEventListener('DOMContentLoaded', render);
-}
 // ---------- Face ID / huella (llave de acceso) ----------
 const b64u = (buf) => btoa(String.fromCharCode.apply(null, new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
@@ -56,7 +42,7 @@ async function faceLogin() { // pide la cara y abre sesión; devuelve true si en
 }
 
 (async () => { // si este dispositivo tiene Face ID activado, pedirlo apenas abre
-  if (!faceOK || window.__goSafari) return; // en modo app viejo no pedimos Face ID: se salta a Safari
+  if (!faceOK) return;
   let has = false; try { has = !!localStorage.getItem('faceId'); } catch (e) {}
   const btn = document.getElementById('face'), err = document.getElementById('e');
   const go = async () => { err.textContent = ''; try { if (await faceLogin()) { try { sessionStorage.setItem('unlocked', '1'); } catch (z) {} location.reload(); } } catch (x) { if (x.name !== 'NotAllowedError') err.textContent = x.message; } };
