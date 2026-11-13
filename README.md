@@ -13,6 +13,7 @@ Estos equipos no ofrecen RTSP ni ONVIF: solo hablan un protocolo propio ("kp2p")
 - Sonido en vivo de la cámara y botón para hablar por su parlante (requiere HTTPS).
 - Grabaciones del disco del DVR: línea de tiempo por día con los tramos de movimiento marcados, salto entre eventos, velocidad y zoom de la línea de tiempo.
 - Descarga de un tramo (marcar inicio y fin): al tocar "Descargar tramo" se elige de qué cámaras bajar ese mismo tramo. Con una cámara baja un `.mp4`; con varias, un solo `.zip` con un `.mp4` por cámara (útil cuando un evento lo toman varias cámaras).
+- Elegir qué cámaras se ven en la grilla (botón "▦ Cámaras" arriba a la derecha): de una sola hasta todas. Se guarda en cada dispositivo, así el Fire TV puede mostrar todas y el iPhone unas pocas; mostrar menos también baja la carga del DVR.
 - Imagen flotante (PiP) donde el navegador lo permite.
 - Se actualiza solo: el servidor baja las versiones nuevas desde GitHub y las pantallas abiertas se recargan.
 - Sin dependencias: solo hace falta Node.js 22 o más nuevo.

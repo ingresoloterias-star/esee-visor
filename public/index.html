@@ -115,6 +115,16 @@
   #clipBusyText { font-weight:650; font-size:16px; margin-bottom:12px; }
   #clipBusyProgress { width:100%; height:12px; accent-color:var(--accent); }
   #clipBusyHint { color:var(--dim); font-size:12.5px; margin:12px 0 16px; }
+  #gridBtn { position:fixed; right:max(10px,env(safe-area-inset-right)); top:max(10px,env(safe-area-inset-top)); z-index:4; height:38px; padding:0 14px; display:inline-flex; align-items:center; gap:7px; background:rgba(12,15,19,.82); border:1px solid rgba(255,255,255,.18); border-radius:11px; color:var(--text); font:600 14px system-ui,sans-serif; cursor:pointer; touch-action:manipulation; }
+  #single.on ~ #gridBtn, #lock.on ~ #gridBtn { display:none; }
+  #gridPick { position:fixed; inset:0; z-index:16; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(0,0,0,.72); }
+  #gridPick.open { display:flex; }
+  #gridPickPanel { width:min(360px,100%); max-height:88vh; display:flex; flex-direction:column; padding:18px; border:1px solid rgba(255,255,255,.16); border-radius:16px; background:#14181d; box-shadow:0 18px 60px rgba(0,0,0,.55); }
+  #gridPickPanel h2 { font-size:17px; margin:0 0 4px; }
+  #gridPickHint { color:var(--dim); font-size:13px; margin:0 0 12px; }
+  #gridPickList { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; overflow:auto; }
+  #gridPickFoot { display:flex; gap:8px; justify-content:flex-end; }
+  #gridPickAll { margin-right:auto; }
   #clipAudio { display:inline-flex; align-items:center; gap:5px; color:var(--dim); font-size:12px; white-space:nowrap; }
   #clipAudio input { width:18px; height:18px; margin:0; accent-color:var(--accent); }
   #lock { position:fixed; inset:0; background:var(--bg); z-index:20; display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
@@ -258,6 +268,19 @@
 <div id="faceBar"><span>Entrar con tu cara</span><button class="btn on" id="faceOn">Activar Face ID</button><button class="btn" id="faceNo">Ahora no</button></div>
 <div id="lock"><div style="font-size:20px;font-weight:600">Cámaras</div><button class="btn on" id="lockBtn">Entrar con Face ID</button><button class="btn" id="lockPinBtn">Entrar con PIN</button><form id="lockForm" style="display:none"><input id="lockPin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN"><button class="btn on">Entrar</button></form><div id="lockMsg"></div></div>
 <div id="ver"></div>
+<button id="gridBtn" title="Elegir qué cámaras se ven en la grilla">▦ Cámaras</button>
+<div id="gridPick" aria-hidden="true">
+  <section id="gridPickPanel" role="dialog" aria-modal="true" aria-labelledby="gridPickTitle">
+    <h2 id="gridPickTitle">¿Qué cámaras ver?</h2>
+    <p id="gridPickHint">Elegí cuáles aparecen en la pantalla principal. Se guarda en este dispositivo.</p>
+    <div id="gridPickList"></div>
+    <div id="gridPickFoot">
+      <button class="btn sm" id="gridPickAll">Todas</button>
+      <button class="btn sm" id="gridPickCancel">Cancelar</button>
+      <button class="btn sm" id="gridPickSave">Guardar</button>
+    </div>
+  </section>
+</div>
 
 <script>
 'use strict';
@@ -438,7 +461,11 @@ function soundToggle() {
 }
 
 // ---------- Estado ----------
-let cameras = [], tiles = [], sel = 0, cur = -1, hd = false, gridConn = null, bigConn = null, version = null, idleTimer = null;
+let cameras = [], allCameras = [], tiles = [], sel = 0, cur = -1, hd = false, gridConn = null, bigConn = null, version = null, idleTimer = null;
+// Qué cámaras mostrar en la grilla (elegido por el usuario, guardado en este dispositivo).
+const GRID_KEY = 'gridCams';
+function savedGridChannels() { try { const v = JSON.parse(localStorage.getItem(GRID_KEY)); return Array.isArray(v) ? v : null; } catch (e) { return null; } }
+function visibleCameras(all) { const saved = savedGridChannels(); if (!saved) return all.slice(); const pick = all.filter((c) => saved.includes(c.channel)); return pick.length ? pick : all.slice(); }
 const grid = $('#grid'), single = $('#single'), bigSink = new Sink($('#big'), $('#bigState'));
 
 function cols() { return parseInt(getComputedStyle(grid).gridTemplateColumns.split(' ').length, 10) || 1; }
@@ -450,6 +477,7 @@ const seen = window.IntersectionObserver ? new IntersectionObserver((list) => {
 }, { root: null, threshold: 0.15 }) : null;
 
 function buildGrid() {
+  if (seen) tiles.forEach((t) => seen.unobserve(t.el));
   grid.innerHTML = ''; tiles = [];
   cameras.forEach((c, i) => {
     const el = document.createElement('div'); el.className = 'tile';
@@ -465,6 +493,39 @@ function buildGrid() {
 }
 function startGrid() { if (gridConn && cur < 0) gridConn.start(); }
 function stopGrid() { if (gridConn) gridConn.stop(); }
+
+// ---------- Elegir qué cámaras se ven en la grilla ----------
+function openGridPick() {
+  const list = $('#gridPickList'); list.innerHTML = '';
+  $('#gridPickHint').textContent = 'Elegí cuáles aparecen en la pantalla principal. Se guarda en este dispositivo.';
+  const vis = new Set(cameras.map((c) => c.channel));
+  allCameras.forEach((c) => {
+    const row = document.createElement('label'); row.className = 'clipCamRow';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = c.channel; cb.checked = vis.has(c.channel);
+    const name = document.createElement('span'); name.textContent = c.name;
+    row.appendChild(cb); row.appendChild(name); list.appendChild(row);
+    const paint = () => row.classList.toggle('pick', cb.checked); cb.addEventListener('change', paint); paint();
+  });
+  $('#gridPick').classList.add('open'); $('#gridPick').setAttribute('aria-hidden', 'false');
+}
+function gridPickClose() { $('#gridPick').classList.remove('open'); $('#gridPick').setAttribute('aria-hidden', 'true'); }
+function gridPickSave() {
+  const chans = [...$('#gridPickList').querySelectorAll('input:checked')].map((b) => Number(b.value));
+  if (!chans.length) { $('#gridPickHint').textContent = 'Elegí al menos una cámara.'; return; }
+  try { localStorage.setItem(GRID_KEY, JSON.stringify(chans)); } catch (e) {}
+  cameras = visibleCameras(allCameras);
+  gridPickClose();
+  stopGrid(); buildGrid(); startGrid();
+}
+$('#gridBtn').addEventListener('click', openGridPick);
+$('#gridPickCancel').addEventListener('click', gridPickClose);
+$('#gridPickSave').addEventListener('click', gridPickSave);
+$('#gridPick').addEventListener('click', (e) => { if (e.target.id === 'gridPick') gridPickClose(); });
+$('#gridPickAll').addEventListener('click', () => {
+  const boxes = [...$('#gridPickList').querySelectorAll('input')];
+  const turnOn = boxes.some((b) => !b.checked);
+  boxes.forEach((b) => { b.checked = turnOn; b.dispatchEvent(new Event('change')); });
+});
 
 function playBig() {
   if (bigConn) bigConn.stop();
@@ -758,6 +819,7 @@ const KEY_PTZ = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRigh
 window.addEventListener('keydown', (e) => {
   if ($('#clipBusy').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') clipCancel(); e.preventDefault(); return; }
   if ($('#clipCams').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); clipCamsClose(); } return; }
+  if ($('#gridPick').classList.contains('open')) { if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); gridPickClose(); } return; }
   if (camSettings.classList.contains('open')) return;
   if (cur >= 0 && rec.on) { recKey(e); return; }
   if (cur >= 0) {
@@ -771,6 +833,7 @@ window.addEventListener('keydown', (e) => {
     else if (e.key === 'ArrowDown') select(Math.min(tiles.length - 1, sel + c)); else if (e.key === 'ArrowUp') select(sel - c >= 0 ? sel - c : sel);
     else if (e.key === 'Enter' || e.key === ' ') openCam(sel);
     else if (/^[1-9]$/.test(e.key) && cameras[+e.key - 1]) openCam(+e.key - 1);
+    else if (e.key === 'm' || e.key === 'ContextMenu') openGridPick();
     else return;
     e.preventDefault();
   }
@@ -873,9 +936,10 @@ function openClipCams() {
   if ($('#clipDownload').disabled) return;
   const list = $('#clipCamsList'); list.innerHTML = '';
   $('#clipCamsRange').textContent = dayKey(rec.clipStart).slice(5) + ' ' + hms(rec.clipStart) + ' → ' + hms(rec.clipEnd);
-  cameras.forEach((c) => {
+  const here = cameras[cur] ? cameras[cur].channel : -1;
+  (allCameras.length ? allCameras : cameras).forEach((c) => {
     const row = document.createElement('label'); row.className = 'clipCamRow';
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = c.channel; cb.checked = c.channel === cameras[cur].channel;
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = c.channel; cb.checked = c.channel === here;
     const name = document.createElement('span'); name.textContent = c.name;
     row.appendChild(cb); row.appendChild(name); list.appendChild(row);
     const paint = () => row.classList.toggle('pick', cb.checked);
@@ -1294,7 +1358,7 @@ document.addEventListener('visibilitychange', () => {
 async function info() { const r = await fetch('/api/info', { cache: 'no-store' }); if (r.status === 401) { location.reload(); throw new Error('pin'); } return r.json(); }
 async function boot() {
   try {
-    const i = await info(); version = i.version; cameras = i.cameras; $('#ver').textContent = 'v' + version;
+    const i = await info(); version = i.version; allCameras = i.cameras; cameras = visibleCameras(allCameras); $('#ver').textContent = 'v' + version;
     buildGrid();
     const camParam = new URLSearchParams(location.search).get('cam');
     const requestedCam = camParam === null ? NaN : Number(camParam);
@@ -1310,7 +1374,7 @@ setInterval(() => {
   const body = JSON.stringify({ ua: navigator.userAgent, mms: !!window.ManagedMediaSource, mse: !!window.MediaSource, view: cur >= 0 ? "una" : "grilla", size: innerWidth + "x" + innerHeight, s: sinks.map((x) => x.stats()) });
   fetch("/api/diag", { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {});
 }, 5000);
-setInterval(async () => { try { const i = await info(); if (version && i.version !== version) location.reload(); else if (!camSettings.classList.contains('open')) cameras = i.cameras; } catch (e) {} }, 60000);
+setInterval(async () => { try { const i = await info(); if (version && i.version !== version) location.reload(); else if (!camSettings.classList.contains('open')) { allCameras = i.cameras; cameras = visibleCameras(allCameras); } } catch (e) {} }, 60000);
 if (lockNeeded()) { $('#lock').classList.add('on'); unlock(); } else boot();
 </script>
 </body>
