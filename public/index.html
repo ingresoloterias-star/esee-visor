@@ -24,7 +24,8 @@
   .state.hide { display:none; }
   @media (orientation:portrait) and (max-width:700px) { #grid { --cols:1 !important; grid-auto-rows:max-content; align-content:start; } .tile { height:calc((100vw - 16px) * 9 / 16); } }
 
-  #single { position:fixed; inset:0; background:#000; display:none; }
+  #single { position:fixed; inset:0; background:#000; display:none; overflow:hidden; }
+  #big { touch-action:none; }
   #single.on { display:block; }
   #back { position:absolute; left:max(12px,env(safe-area-inset-left)); top:max(12px,env(safe-area-inset-top)); height:38px; min-width:38px; padding:0 10px; font-size:15px; border-radius:10px; touch-action:manipulation; }
   #title { left:calc(max(12px,env(safe-area-inset-left)) + 46px); top:calc(max(12px,env(safe-area-inset-top)) + 7px); font-size:15px; }
@@ -165,12 +166,23 @@
   #acts .btn.ask { background:#ffb020; color:#221300; border-color:#ffb020; }
   #single.rec #acts { display:none; }
   #faceChip { position:fixed; left:max(10px,env(safe-area-inset-left)); bottom:max(6px,env(safe-area-inset-bottom)); z-index:3; display:none; background:rgba(12,15,19,.85); color:var(--accent); border:1px solid rgba(62,166,255,.5); border-radius:8px; font:600 12px system-ui,sans-serif; padding:5px 10px; cursor:pointer; touch-action:manipulation; }
+  #areaBox { position:absolute; border:2px solid var(--accent); background:rgba(62,166,255,.18); border-radius:3px; z-index:2; pointer-events:none; display:none; }
+  #areaTools { position:absolute; left:50%; top:max(12px,env(safe-area-inset-top)); transform:translateX(-50%); z-index:3; display:none; gap:6px; align-items:center; background:rgba(12,15,19,.9); border:1px solid rgba(255,255,255,.18); border-radius:12px; padding:5px 6px 5px 10px; }
+  #single.areaZoom #areaTools { display:flex; }
+  #areaTools #areaZ { color:var(--accent); font:600 13px system-ui,sans-serif; min-width:28px; text-align:center; }
+  #single.rec #areaTools, #single.rec #areaBox { display:none !important; }
 </style>
 </head>
 <body>
 <div id="grid"></div>
 <div id="single">
   <video id="big" muted playsinline autoplay></video>
+  <div id="areaBox"></div>
+  <div id="areaTools" class="ui">
+    <span id="areaZ">1×</span>
+    <button class="btn sm" id="areaOptical">Acercar cámara</button>
+    <button class="btn sm" id="areaReset">Quitar zoom</button>
+  </div>
   <div class="state" id="bigState">Conectando…</div>
   <button class="btn ui" id="back" title="Volver">✕</button>
   <div id="title" class="ui"></div>
@@ -237,7 +249,7 @@
       <span id="clipStatus" role="status"></span>
     </div>
   </div>
-  <div id="hint" class="ui">Flechas: mover · OK: calidad · +/−: zoom · Atrás: volver</div>
+  <div id="hint" class="ui">Dibujá un recuadro para acercar · Flechas: mover · OK: calidad · Atrás: volver</div>
 </div>
 <div id="datePicker" aria-hidden="true">
   <section id="datePickerPanel" role="dialog" aria-modal="true" aria-labelledby="datePickerMonth">
@@ -583,7 +595,8 @@ function openCam(i, push = true) {
   $('#pad').style.display = $('#zoom').style.display = c.ptz ? '' : 'none';
   $('#presetsBtn').style.display = c.ptz ? '' : 'none';
   $('#quick').style.display = c.ptz ? '' : 'none';
-  renderQuick();
+  $('#areaOptical').style.display = c.ptz ? '' : 'none';
+  renderQuick(); areaReset();
   $('#settings').style.display = '';
   micStop(); $('#mic').style.display = micOK ? '' : 'none';
   buildActions(c);
@@ -592,7 +605,7 @@ function openCam(i, push = true) {
 }
 function closeCam() {
   if (cur < 0) return;
-  presetClose(); recExit(false); ptzStop(); micStop(); if (bigConn) { bigConn.stop(); bigConn = null; }
+  presetClose(); areaReset(); recExit(false); ptzStop(); micStop(); if (bigConn) { bigConn.stop(); bigConn = null; }
   single.classList.remove('on'); const was = cur; cur = -1; select(was); startGrid();
 }
 function goBack() { if (rec.on) return recExit(); if (history.state && history.state.cam !== undefined) history.back(); else closeCam(); }
@@ -949,7 +962,7 @@ window.addEventListener('keydown', (e) => {
   if (cur >= 0) {
     if (KEY_PTZ[e.key]) { e.preventDefault(); if (cameras[cur].ptz) ptzStart(KEY_PTZ[e.key]); }
     else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) { hd = !hd; playBig(); } }
-    else if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); goBack(); }
+    else if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'GoBack' || e.key === 'BrowserBack') { e.preventDefault(); if (area.z > 1) areaReset(); else goBack(); }
     else if (/^[1-9]$/.test(e.key) && cameras[+e.key - 1]) { openCam(+e.key - 1, false); }
   } else {
     const c = cols();
@@ -1008,6 +1021,73 @@ if (pipWebkit || document.pictureInPictureEnabled || homeScreenApp) {
     } catch (e) {}
   });
 }
+
+// ---------- Zoom al recuadro: dibujás una zona y se acerca ahí ----------
+// Digital: agranda esa parte de la imagen (instantáneo, no mueve la cámara).
+// Óptico: botón que intenta mover y acercar el lente hacia esa zona (aproximado).
+const area = { drag: null, cx: 0.5, cy: 0.5, z: 1 };
+const areaBox = $('#areaBox');
+function areaApply() {
+  const W = bigV.clientWidth, H = bigV.clientHeight;
+  if (area.z > 1) {
+    const Tx = W / 2 - area.z * area.cx * W, Ty = H / 2 - area.z * area.cy * H;
+    bigV.style.transformOrigin = '0 0';
+    bigV.style.transform = `translate(${Tx}px, ${Ty}px) scale(${area.z})`;
+  } else bigV.style.transform = '';
+  single.classList.toggle('areaZoom', area.z > 1);
+  $('#areaZ').textContent = (Math.round(area.z * 10) / 10) + '×';
+}
+function areaReset() { area.z = 1; area.cx = area.cy = 0.5; area.drag = null; areaBox.style.display = 'none'; areaApply(); }
+bigV.addEventListener('pointerdown', (e) => {
+  if (rec.on || cur < 0 || !single.classList.contains('on')) return;
+  wake(); area.drag = { x0: e.clientX, y0: e.clientY, id: e.pointerId, moved: false };
+  try { bigV.setPointerCapture(e.pointerId); } catch (z) {}
+});
+bigV.addEventListener('pointermove', (e) => {
+  if (!area.drag || e.pointerId !== area.drag.id) return;
+  const dx = e.clientX - area.drag.x0, dy = e.clientY - area.drag.y0;
+  if (!area.drag.moved && Math.hypot(dx, dy) < 12) return;
+  area.drag.moved = true; e.preventDefault();
+  areaBox.style.display = 'block';
+  areaBox.style.left = Math.min(e.clientX, area.drag.x0) + 'px';
+  areaBox.style.top = Math.min(e.clientY, area.drag.y0) + 'px';
+  areaBox.style.width = Math.abs(dx) + 'px';
+  areaBox.style.height = Math.abs(dy) + 'px';
+});
+bigV.addEventListener('pointerup', (e) => {
+  if (!area.drag || e.pointerId !== area.drag.id) return;
+  const d = area.drag; area.drag = null; areaBox.style.display = 'none';
+  try { bigV.releasePointerCapture(e.pointerId); } catch (z) {}
+  if (!d.moved) return;
+  const r = bigV.getBoundingClientRect();
+  const nx0 = (Math.min(e.clientX, d.x0) - r.left) / r.width, nx1 = (Math.max(e.clientX, d.x0) - r.left) / r.width;
+  const ny0 = (Math.min(e.clientY, d.y0) - r.top) / r.height, ny1 = (Math.max(e.clientY, d.y0) - r.top) / r.height;
+  const w = Math.max(0.03, nx1 - nx0), h = Math.max(0.03, ny1 - ny0);
+  area.cx = Math.min(1, Math.max(0, (nx0 + nx1) / 2)); area.cy = Math.min(1, Math.max(0, (ny0 + ny1) / 2));
+  area.z = Math.min(8, Math.max(1, 1 / Math.max(w, h)));
+  areaApply();
+});
+bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.display = 'none'; });
+$('#areaReset').addEventListener('click', areaReset);
+// Óptico aproximado: barre con el motor hacia el centro del recuadro y acerca el lente.
+// Como el protocolo no tiene "ir exacto a este cuadro", es por pulsos de tiempo (ajustable).
+const PTZ_SWEEP_MS = 1100; // cuánto dura el barrido de lado a lado; se calibra con la prueba
+async function opticalToward(cam, cx, cy, z) {
+  const send = (action) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: cam.channel, action, speed: cam.ptzSpeed || 4 }) }).catch(() => {});
+  const pulse = (action, ms) => new Promise((res) => { send(action); setTimeout(() => { send('stop'); setTimeout(res, 300); }, ms); });
+  const dx = cx - 0.5, dy = cy - 0.5;
+  if (Math.abs(dx) > 0.06) await pulse(dx > 0 ? 'right' : 'left', Math.min(2200, Math.abs(dx) * 2 * PTZ_SWEEP_MS));
+  if (Math.abs(dy) > 0.06) await pulse(dy > 0 ? 'down' : 'up', Math.min(2200, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
+  const zoomPulses = Math.min(6, Math.round(z - 1));
+  for (let i = 0; i < zoomPulses; i++) await pulse('zoomIn', 500);
+}
+$('#areaOptical').addEventListener('click', async () => {
+  const cam = cameras[cur]; if (!cam || !cam.ptz) return;
+  const cx = area.cx, cy = area.cy, z = area.z;
+  areaReset(); // la cámara va a encuadrar de verdad, así que sacamos el zoom digital
+  toast('Acercando la cámara…', 2500);
+  await opticalToward(cam, cx, cy, z);
+});
 
 // ---------- Grabaciones ----------
 // Las horas son "segundos DVR": hora de pared como si fuera UTC (por eso se formatean con getUTC*).
@@ -1308,7 +1388,7 @@ function recTick() {
 
 async function recEnter() {
   if (cur < 0 || rec.on) return;
-  ptzStop(); micStop(); if (bigConn) { bigConn.stop(); bigConn = null; }
+  ptzStop(); micStop(); areaReset(); if (bigConn) { bigConn.stop(); bigConn = null; }
   rec.on = true; rec.gen++; rec.zoom = 0; rec.speed = 0; rec.pendingT = null; rec.scrubW0 = null; rec.segs = []; rec.events = []; rec.clipStart = rec.clipEnd = null; clipUpdate();
   single.classList.add('rec'); $('#rSpeed').textContent = '1x'; recSetPlaying(true);
   rec.nowBase = Date.now() / 1000 - new Date().getTimezoneOffset() * 60; rec.nowAt = performance.now();
