@@ -662,6 +662,10 @@ const server = http.createServer(async (req, res) => {
       const ch = Number(q.channel), op = String(q.op || '');
       if (!validChannel(ch)) return json(res, 404, { error: 'canal inexistente' });
       let list = presetsFor(ch).slice();
+      // Posición previa para el botón "Volver": se guarda en un slot reservado (no aparece en la lista).
+      const RETURN_SLOT = 199;
+      if (op === 'mark') { ptz(ch, 'presetSet', 0, RETURN_SLOT); return json(res, 200, { ok: true }); }
+      if (op === 'return') { ptz(ch, 'presetGo', 0, RETURN_SLOT); return json(res, 200, { ok: true }); }
       if (op === 'go') {
         const n = Number(q.n);
         if (!(n >= 1 && n <= 255)) return json(res, 400, { error: 'posición inválida' });

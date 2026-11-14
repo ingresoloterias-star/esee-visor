@@ -171,6 +171,8 @@
   #single.areaZoom #areaTools { display:flex; }
   #areaTools #areaZ { color:var(--accent); font:600 13px system-ui,sans-serif; min-width:28px; text-align:center; }
   #single.rec #areaTools, #single.rec #areaBox { display:none !important; }
+  #backPos { position:absolute; left:50%; top:max(12px,env(safe-area-inset-top)); transform:translateX(-50%); z-index:3; background:rgba(12,15,19,.92); border-color:rgba(255,255,255,.22); }
+  #single.rec #backPos { display:none !important; }
 </style>
 </head>
 <body>
@@ -183,6 +185,7 @@
     <button class="btn sm" id="areaOptical">Acercar cámara</button>
     <button class="btn sm" id="areaReset">Quitar zoom</button>
   </div>
+  <button class="btn ui" id="backPos" style="display:none">↩ Volver</button>
   <div class="state" id="bigState">Conectando…</div>
   <button class="btn ui" id="back" title="Volver">✕</button>
   <div id="title" class="ui"></div>
@@ -596,6 +599,7 @@ function openCam(i, push = true) {
   $('#presetsBtn').style.display = c.ptz ? '' : 'none';
   $('#quick').style.display = c.ptz ? '' : 'none';
   $('#areaOptical').style.display = c.ptz ? '' : 'none';
+  $('#backPos').style.display = 'none';
   renderQuick(); areaReset();
   $('#settings').style.display = '';
   micStop(); $('#mic').style.display = micOK ? '' : 'none';
@@ -1070,23 +1074,34 @@ bigV.addEventListener('pointerup', (e) => {
 bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.display = 'none'; });
 $('#areaReset').addEventListener('click', areaReset);
 // Óptico aproximado: barre con el motor hacia el centro del recuadro y acerca el lente.
-// Como el protocolo no tiene "ir exacto a este cuadro", es por pulsos de tiempo (ajustable).
-const PTZ_SWEEP_MS = 1100; // cuánto dura el barrido de lado a lado; se calibra con la prueba
+// Como el protocolo no tiene "ir exacto a este cuadro", es por pulsos de tiempo (ajustables abajo).
+const PTZ_SWEEP_MS = 650;   // duración del barrido horizontal/vertical (↑ mueve más)
+const PTZ_INVERT_Y = false; // poné true si sube/baja al revés
+const PTZ_ZOOM_MS = 420;    // duración de cada pulso de acercamiento del lente
+const PTZ_ZOOM_MAX = 4;     // tope de pulsos de zoom
 async function opticalToward(cam, cx, cy, z) {
   const send = (action) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: cam.channel, action, speed: cam.ptzSpeed || 4 }) }).catch(() => {});
-  const pulse = (action, ms) => new Promise((res) => { send(action); setTimeout(() => { send('stop'); setTimeout(res, 300); }, ms); });
-  const dx = cx - 0.5, dy = cy - 0.5;
-  if (Math.abs(dx) > 0.06) await pulse(dx > 0 ? 'right' : 'left', Math.min(2200, Math.abs(dx) * 2 * PTZ_SWEEP_MS));
-  if (Math.abs(dy) > 0.06) await pulse(dy > 0 ? 'down' : 'up', Math.min(2200, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
-  const zoomPulses = Math.min(6, Math.round(z - 1));
-  for (let i = 0; i < zoomPulses; i++) await pulse('zoomIn', 500);
+  const pulse = (action, ms) => new Promise((res) => { send(action); setTimeout(() => { send('stop'); setTimeout(res, 350); }, ms); });
+  const dx = cx - 0.5, dy = (cy - 0.5) * (PTZ_INVERT_Y ? -1 : 1);
+  if (Math.abs(dx) > 0.08) await pulse(dx > 0 ? 'right' : 'left', Math.min(1600, Math.abs(dx) * 2 * PTZ_SWEEP_MS));
+  if (Math.abs(dy) > 0.08) await pulse(dy > 0 ? 'down' : 'up', Math.min(1600, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
+  const zoomPulses = Math.min(PTZ_ZOOM_MAX, Math.round((z - 1) / 1.6));
+  for (let i = 0; i < zoomPulses; i++) await pulse('zoomIn', PTZ_ZOOM_MS);
 }
 $('#areaOptical').addEventListener('click', async () => {
   const cam = cameras[cur]; if (!cam || !cam.ptz) return;
   const cx = area.cx, cy = area.cy, z = area.z;
   areaReset(); // la cámara va a encuadrar de verdad, así que sacamos el zoom digital
+  // Guardar la posición actual para poder volver con un toque.
+  try { await presetReq({ channel: cam.channel, op: 'mark' }); $('#backPos').style.display = ''; } catch (e) {}
   toast('Acercando la cámara…', 2500);
   await opticalToward(cam, cx, cy, z);
+});
+$('#backPos').addEventListener('click', async () => {
+  const cam = cameras[cur]; if (!cam) return;
+  $('#backPos').style.display = 'none';
+  try { await presetReq({ channel: cam.channel, op: 'return' }); toast('Volviendo a la posición anterior…', 2500); }
+  catch { toast('No se pudo volver', 4000); }
 });
 
 // ---------- Grabaciones ----------
