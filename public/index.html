@@ -71,7 +71,7 @@
   @media (max-width:700px) { #hint { display:none; } }
   #rec { position:absolute; left:0; right:0; bottom:0; display:none; flex-direction:column; gap:6px; padding:26px max(12px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left)); background:linear-gradient(transparent,rgba(0,0,0,.82) 38%); }
   #single.rec #rec { display:flex; }
-  #single.rec #pad, #single.rec #zoom, #single.rec #quick, #single.rec #hint, #single.rec #hd, #single.rec #mic, #single.rec #settings, #single.rec #presetsBtn { display:none !important; }
+  #single.rec #pad, #single.rec #zoom, #single.rec #quick, #single.rec #hint, #single.rec #hd, #single.rec #mic, #single.rec #settings, #single.rec #presetsBtn, #single.rec #drawBtn { display:none !important; }
   #top .btn.live { background:#e5484d; border-color:#e5484d; color:#fff; }
   #micCfg { position:absolute; right:max(12px,env(safe-area-inset-right)); top:calc(max(12px,env(safe-area-inset-top)) + 46px); display:none; flex-wrap:wrap; justify-content:flex-end; gap:6px; align-items:center; background:var(--glass); padding:6px 8px; border-radius:12px; font-size:13px; max-width:calc(100vw - 24px); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); }
   #micCfg .btn { height:34px; min-width:34px; padding:0 9px; font-size:13px; border-radius:9px; touch-action:manipulation; }
@@ -196,6 +196,7 @@
     <button class="btn" id="recBtn" title="Grabaciones">Grab.</button>
     <button class="btn" id="pip" style="display:none">PiP</button>
     <button class="btn" id="presetsBtn" title="Posiciones guardadas" style="display:none">◎ Pos.</button>
+    <button class="btn" id="drawBtn" title="Dibujar una zona para acercar">⬚ Zona</button>
     <button class="btn" id="settings" title="Ajustes de cámara" aria-label="Ajustes de cámara">⚙</button>
     <button class="btn" id="hd">HD</button>
   </div>
@@ -252,7 +253,7 @@
       <span id="clipStatus" role="status"></span>
     </div>
   </div>
-  <div id="hint" class="ui">Dibujá un recuadro para acercar · Flechas: mover · OK: calidad · Atrás: volver</div>
+  <div id="hint" class="ui">Tocá "⬚ Zona" para acercar un sector · Flechas: mover · Atrás: volver</div>
 </div>
 <div id="datePicker" aria-hidden="true">
   <section id="datePickerPanel" role="dialog" aria-modal="true" aria-labelledby="datePickerMonth">
@@ -600,7 +601,7 @@ function openCam(i, push = true) {
   $('#quick').style.display = c.ptz ? '' : 'none';
   $('#areaOptical').style.display = c.ptz ? '' : 'none';
   $('#backPos').style.display = 'none';
-  renderQuick(); areaReset();
+  renderQuick(); areaReset(); setArm(false);
   $('#settings').style.display = '';
   micStop(); $('#mic').style.display = micOK ? '' : 'none';
   buildActions(c);
@@ -1042,9 +1043,18 @@ function areaApply() {
   $('#areaZ').textContent = (Math.round(area.z * 10) / 10) + '×';
 }
 function areaReset() { area.z = 1; area.cx = area.cy = 0.5; area.drag = null; areaBox.style.display = 'none'; areaApply(); }
+// El recuadro solo se dibuja cuando está activado con el botón "Zona" (así no se activa al tocar la imagen).
+function setArm(on) {
+  area.arm = on;
+  $('#drawBtn').classList.toggle('on', on);
+  $('#hint').textContent = on ? 'Dibujá la zona que querés acercar' : 'Tocá "⬚ Zona" para acercar un sector · Flechas: mover · Atrás: volver';
+}
+$('#drawBtn').addEventListener('click', () => setArm(!area.arm));
 bigV.addEventListener('pointerdown', (e) => {
   if (rec.on || cur < 0 || !single.classList.contains('on')) return;
-  wake(); area.drag = { x0: e.clientX, y0: e.clientY, id: e.pointerId, moved: false };
+  wake();
+  if (!area.arm) return;
+  area.drag = { x0: e.clientX, y0: e.clientY, id: e.pointerId, moved: false };
   try { bigV.setPointerCapture(e.pointerId); } catch (z) {}
 });
 bigV.addEventListener('pointermove', (e) => {
@@ -1070,6 +1080,7 @@ bigV.addEventListener('pointerup', (e) => {
   area.cx = Math.min(1, Math.max(0, (nx0 + nx1) / 2)); area.cy = Math.min(1, Math.max(0, (ny0 + ny1) / 2));
   area.z = Math.min(8, Math.max(1, 1 / Math.max(w, h)));
   areaApply();
+  setArm(false); // se desactiva solo tras dibujar uno; se vuelve a tocar "Zona" para otro
 });
 bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.display = 'none'; });
 $('#areaReset').addEventListener('click', areaReset);
