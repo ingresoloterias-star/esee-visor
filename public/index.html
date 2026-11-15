@@ -1075,17 +1075,17 @@ bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.d
 $('#areaReset').addEventListener('click', areaReset);
 // Óptico aproximado: barre con el motor hacia el centro del recuadro y acerca el lente.
 // Como el protocolo no tiene "ir exacto a este cuadro", es por pulsos de tiempo (ajustables abajo).
-const PTZ_SWEEP_MS = 650;   // duración del barrido horizontal/vertical (↑ mueve más)
+const PTZ_SWEEP_MS = 800;   // duración del barrido horizontal/vertical (↑ mueve más)
 const PTZ_INVERT_Y = false; // poné true si sube/baja al revés
-const PTZ_ZOOM_MS = 420;    // duración de cada pulso de acercamiento del lente
-const PTZ_ZOOM_MAX = 4;     // tope de pulsos de zoom
+const PTZ_ZOOM_MS = 450;    // duración de cada pulso de acercamiento del lente
+const PTZ_ZOOM_MAX = 7;     // tope de pulsos de zoom
 async function opticalToward(cam, cx, cy, z) {
   const send = (action) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: cam.channel, action, speed: cam.ptzSpeed || 4 }) }).catch(() => {});
   const pulse = (action, ms) => new Promise((res) => { send(action); setTimeout(() => { send('stop'); setTimeout(res, 350); }, ms); });
   const dx = cx - 0.5, dy = (cy - 0.5) * (PTZ_INVERT_Y ? -1 : 1);
-  if (Math.abs(dx) > 0.08) await pulse(dx > 0 ? 'right' : 'left', Math.min(1600, Math.abs(dx) * 2 * PTZ_SWEEP_MS));
-  if (Math.abs(dy) > 0.08) await pulse(dy > 0 ? 'down' : 'up', Math.min(1600, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
-  const zoomPulses = Math.min(PTZ_ZOOM_MAX, Math.round((z - 1) / 1.6));
+  if (Math.abs(dx) > 0.04) await pulse(dx > 0 ? 'right' : 'left', Math.min(1800, Math.abs(dx) * 2 * PTZ_SWEEP_MS));
+  if (Math.abs(dy) > 0.04) await pulse(dy > 0 ? 'down' : 'up', Math.min(1800, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
+  const zoomPulses = Math.min(PTZ_ZOOM_MAX, Math.round(z - 1));
   for (let i = 0; i < zoomPulses; i++) await pulse('zoomIn', PTZ_ZOOM_MS);
 }
 $('#areaOptical').addEventListener('click', async () => {
@@ -1093,7 +1093,8 @@ $('#areaOptical').addEventListener('click', async () => {
   const cx = area.cx, cy = area.cy, z = area.z;
   areaReset(); // la cámara va a encuadrar de verdad, así que sacamos el zoom digital
   // Guardar la posición actual para poder volver con un toque.
-  try { await presetReq({ channel: cam.channel, op: 'mark' }); $('#backPos').style.display = ''; } catch (e) {}
+  // Se espera un momento antes de mover para que la cámara alcance a guardarla.
+  try { await presetReq({ channel: cam.channel, op: 'mark' }); await sleep(900); $('#backPos').style.display = ''; } catch (e) {}
   toast('Acercando la cámara…', 2500);
   await opticalToward(cam, cx, cy, z);
 });

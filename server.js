@@ -663,7 +663,7 @@ const server = http.createServer(async (req, res) => {
       if (!validChannel(ch)) return json(res, 404, { error: 'canal inexistente' });
       let list = presetsFor(ch).slice();
       // Posición previa para el botón "Volver": se guarda en un slot reservado (no aparece en la lista).
-      const RETURN_SLOT = 199;
+      const RETURN_SLOT = 30; // número bajo: muchas cámaras ignoran o reservan los slots altos
       if (op === 'mark') { ptz(ch, 'presetSet', 0, RETURN_SLOT); return json(res, 200, { ok: true }); }
       if (op === 'return') { ptz(ch, 'presetGo', 0, RETURN_SLOT); return json(res, 200, { ok: true }); }
       if (op === 'go') {
