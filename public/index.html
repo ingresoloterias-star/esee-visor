@@ -1075,18 +1075,22 @@ bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.d
 $('#areaReset').addEventListener('click', areaReset);
 // Óptico aproximado: barre con el motor hacia el centro del recuadro y acerca el lente.
 // Como el protocolo no tiene "ir exacto a este cuadro", es por pulsos de tiempo (ajustables abajo).
-const PTZ_SWEEP_X_MS = 1400; // duración del barrido horizontal (↑ mueve más)
-const PTZ_SWEEP_MS = 800;    // duración del barrido vertical (↑ mueve más)
+const PTZ_X_START = 0.03, PTZ_X_PER_MS = 0.0003; // horizontal: fracción de cuadro al arrancar y por ms
+const PTZ_Y_START = 0.15, PTZ_Y_PER_MS = 0.0004; // vertical: ídem (se mueve a saltos grandes)
 const PTZ_INVERT_Y = false; // poné true si sube/baja al revés
 const PTZ_ZOOM_MS = 450;    // duración de cada pulso de acercamiento del lente
-const PTZ_ZOOM_MAX = 7;     // tope de pulsos de zoom
+const PTZ_ZOOM_STEP = 1.35; // cuánto acerca cada pulso
+const PTZ_ZOOM_MAX = 4;     // el lente no da más que ~3,4×
 async function opticalToward(cam, cx, cy, z) {
   const send = (action) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: cam.channel, action, speed: cam.ptzSpeed || 4 }) }).catch(() => {});
   const pulse = (action, ms) => new Promise((res) => { send(action); setTimeout(() => { send('stop'); setTimeout(res, 350); }, ms); });
   const dx = cx - 0.5, dy = (cy - 0.5) * (PTZ_INVERT_Y ? -1 : 1);
-  if (Math.abs(dx) > 0.04) await pulse(dx > 0 ? 'right' : 'left', Math.min(2500, Math.abs(dx) * 2 * PTZ_SWEEP_X_MS));
-  if (Math.abs(dy) > 0.04) await pulse(dy > 0 ? 'down' : 'up', Math.min(1800, Math.abs(dy) * 2 * PTZ_SWEEP_MS));
-  const zoomPulses = Math.min(PTZ_ZOOM_MAX, Math.round(z - 1));
+  // Medido sobre la cámara en gran angular: el giro horizontal corre la imagen ~3% al arrancar
+  // y ~3% más cada 100 ms; el vertical es a saltos (~15% el mínimo, +4% cada 100 ms).
+  // Cada pulso de zoom acerca ×1,35 y el lente llega a ~3,4× (4 pulsos).
+  if (Math.abs(dx) >= 0.04) await pulse(dx > 0 ? 'right' : 'left', Math.max(60, Math.min(2500, (Math.abs(dx) - PTZ_X_START) / PTZ_X_PER_MS)));
+  if (Math.abs(dy) >= 0.09) await pulse(dy > 0 ? 'down' : 'up', Math.max(50, Math.min(1200, (Math.abs(dy) - PTZ_Y_START) / PTZ_Y_PER_MS)));
+  const zoomPulses = Math.max(0, Math.min(PTZ_ZOOM_MAX, Math.round(Math.log(z) / Math.log(PTZ_ZOOM_STEP))));
   for (let i = 0; i < zoomPulses; i++) await pulse('zoomIn', PTZ_ZOOM_MS);
 }
 $('#areaOptical').addEventListener('click', async () => {
