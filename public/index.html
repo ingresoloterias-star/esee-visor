@@ -1098,7 +1098,14 @@ async function opticalToward(cam, cx, cy) {
   // el vertical es a saltos (~15% el mínimo, +4% cada 100 ms).
   const dx = cx - 0.5, dy = (cy - 0.5) * (PTZ_INVERT_Y ? -1 : 1);
   if (Math.abs(dx) >= 0.04) await pulse(dx > 0 ? 'right' : 'left', Math.max(60, Math.min(2500, (Math.abs(dx) - PTZ_X_START) / PTZ_X_PER_MS)));
-  if (Math.abs(dy) >= 0.09) await pulse(dy > 0 ? 'down' : 'up', Math.max(50, Math.min(1200, (Math.abs(dy) - PTZ_Y_START) / PTZ_Y_PER_MS)));
+  // Vertical: el motor se mueve a saltos (~0,17 el mínimo, ~0,24 el tope por pulso) y hacia arriba
+  // tiene zona muerta (necesita un pulso más largo para arrancar). Un pulso corto no alcanza, así
+  // que se usa un mínimo que mueva de verdad y uno más largo para los desvíos grandes.
+  if (Math.abs(dy) >= 0.1) {
+    const up = dy < 0, big = Math.abs(dy) >= 0.22;
+    await pulse(up ? 'up' : 'down', up ? (big ? 380 : 170) : (big ? 280 : 90));
+    if (Math.abs(dy) >= 0.34) await pulse(up ? 'up' : 'down', up ? 250 : 180); // desvío muy grande: segundo salto
+  }
   await pulse('zoomIn', PTZ_ZOOM_FULL_MS); // todo el zoom óptico disponible
 }
 $('#areaOptical').addEventListener('click', async () => {
