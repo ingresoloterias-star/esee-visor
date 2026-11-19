@@ -275,6 +275,9 @@ const cameraPtzSpeed = (channel) => {
   const speed = Number(cameraSettings[channel]?.ptzSpeed);
   return Number.isInteger(speed) && speed >= 1 && speed <= 8 ? speed : 4;
 };
+// Punto hacia el que acerca el lente (x, y en 0..1 de la imagen sin zoom). No suele ser el centro exacto:
+// el visor lo mide solo al usar "Acercar cámara" y lo guarda para apuntar ahí antes de acercar.
+const zoomAxisFor = (channel) => { const a = cameraSettings[channel]?.zoomAxis; return Array.isArray(a) && a.length === 2 && a.every((v) => Number.isFinite(v) && v > 0.2 && v < 0.8) ? a : null; };
 // Posiciones guardadas (presets PTZ) de una cámara: [{ n, label }]. La posición y el zoom
 // los guarda la cámara; acá solo recordamos el número de slot y el nombre.
 const presetsFor = (channel) => (Array.isArray(cameraSettings[channel]?.presets) ? cameraSettings[channel].presets : []);
@@ -437,7 +440,7 @@ const server = http.createServer(async (req, res) => {
       if (!p.endsWith('.webmanifest')) return json(res, 401, { error: 'Hace falta el PIN' });
     }
 
-    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), presets: presetsFor(c.channel), quick: quickFor(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
+    if (p === '/api/info') return json(res, 200, { version: VERSION, pin: !!PIN, cameras: cams.cameras.map((c) => ({ channel: c.channel, name: c.name, ptz: !!c.ptz, ptzSpeed: cameraPtzSpeed(c.channel), zoomAxis: zoomAxisFor(c.channel), presets: presetsFor(c.channel), quick: quickFor(c.channel), actions: actionsFor(c.channel).map((a) => ({ id: a.id, label: a.label })) })) });
 
     // --- eWeLink: estado, conexión de la cuenta, dispositivos y configuración de botones ---
     if (p === '/api/ewelink/status') {
@@ -507,6 +510,13 @@ const server = http.createServer(async (req, res) => {
       let q = {}; try { q = JSON.parse(await readBody(req, 2000)); } catch { /* pedido inválido */ }
       if (!q || typeof q !== 'object' || Array.isArray(q)) q = {};
       const ch = Number(q.channel), speed = Number(q.ptzSpeed);
+      if (validChannel(ch) && q.ptzSpeed === undefined && Array.isArray(q.zoomAxis)) {
+        const a = q.zoomAxis.map(Number);
+        if (a.length !== 2 || !a.every((v) => Number.isFinite(v) && v > 0.2 && v < 0.8)) return json(res, 400, { error: 'ajuste inválido' });
+        cameraSettings[ch] = { ...(cameraSettings[ch] || {}), zoomAxis: a.map((v) => Math.round(v * 1000) / 1000) };
+        saveCameraSettings();
+        return json(res, 200, { channel: ch, zoomAxis: cameraSettings[ch].zoomAxis });
+      }
       if (!validChannel(ch) || !Number.isInteger(speed) || speed < 1 || speed > 8) return json(res, 400, { error: 'ajuste inválido' });
       cameraSettings[ch] = { ...(cameraSettings[ch] || {}), ptzSpeed: speed };
       fs.writeFileSync(CAMERA_SETTINGS_FILE, JSON.stringify(cameraSettings, null, 2) + '\n');
@@ -653,6 +663,16 @@ const server = http.createServer(async (req, res) => {
       const ch = Number(q.channel);
       if (!validChannel(ch)) return json(res, 404, { error: 'canal inexistente' });
       const speed = Math.max(0, Math.min(8, Number(q.speed) || 0));
+      // Pulso con duración exacta: el servidor arranca, espera y para. Si lo hiciera el navegador con
+      // dos pedidos (mover / parar), el largo real del pulso variaría con la red y con el dispositivo.
+      const ms = Math.round(Number(q.ms) || 0);
+      if (ms) {
+        if (ms < 40 || ms > 5000 || String(q.action) === 'stop') return json(res, 400, { error: 'pulso inválido' });
+        if (!ptz(ch, String(q.action), speed)) return json(res, 400, { error: 'acción inválida' });
+        await new Promise((r) => setTimeout(r, ms));
+        ptz(ch, 'stop', speed);
+        return json(res, 200, { ok: true, ms });
+      }
       return json(res, ptz(ch, String(q.action), speed) ? 200 : 400, { ok: true });
     }
 

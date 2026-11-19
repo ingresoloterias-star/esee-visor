@@ -1084,147 +1084,279 @@ bigV.addEventListener('pointerup', (e) => {
 });
 bigV.addEventListener('pointercancel', () => { area.drag = null; areaBox.style.display = 'none'; });
 $('#areaReset').addEventListener('click', areaReset);
-// "Acercar cámara": centrado automático por imagen (lazo cerrado).
-// El motor PTZ no informa su posición y responde distinto al mismo pulso, así que no se calcula el
-// tiempo a ciegas: se MIDE. Antes y después de cada pulso se captura el video, se calcula cuánto se
-// movió la imagen (por correlación) y se corrige, hasta dejar el punto marcado en el centro. Primero
-// centra en gran angular (donde el blanco es el centro del recuadro), después da todo el zoom óptico
-// (que lo mantiene centrado) y al final ajusta fino: con el lente acercado "abajo" mueve suave, así
-// que remata bajando. Si el motor estuviera invertido, el propio lazo lo detecta y cambia de sentido.
-const PTZ_ZOOM_FULL_MS = 3000;   // zoomIn continuo hasta el tope del lente
-const PTZ_ZOOM_FACTOR = 3;       // aumento aprox. del lente (para estimar el residuo tras el zoom)
-const CAP_W = 160, CAP_H = 120;  // tamaño reducido para medir el movimiento
-const capCan = Object.assign(document.createElement('canvas'), { width: CAP_W, height: CAP_H });
-const capCtx = capCan.getContext('2d', { willReadFrequently: true });
-function capGray() {
-  if (!bigV.videoWidth) return null;
-  try { capCtx.drawImage(bigV, 0, 0, CAP_W, CAP_H); } catch (e) { return null; }
-  const d = capCtx.getImageData(0, 0, CAP_W, CAP_H).data, g = new Float32Array(CAP_W * CAP_H);
-  for (let i = 0; i < g.length; i++) g[i] = d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2];
-  return g;
+///////////// "Acercar cámara": centra el punto marcado con el motor y da el zoom óptico, guiándose por la imagen.
+// Medido en estas cámaras: el lente aumenta ~3,9× y llega al tope en 2-3 s, pero NO acerca hacia el centro
+// de la imagen sino hacia un punto propio de cada cámara (el "eje del zoom", corrido unos puntos; en la
+// cámara 1 eso solo ya dejaba el objetivo 16% afuera). Por eso:
+//  1) Se recorta el objetivo de la foto del momento y, después de cada pulso, se lo BUSCA en la imagen
+//     actual: es una posición absoluta, así que un pulso mal medido no se arrastra al siguiente.
+//  2) Se lo lleva al eje del zoom de esa cámara (no al centro) y recién ahí se acerca.
+//  3) Con el lente acercado se ubica la vista dentro de la foto tomada justo antes de acercar (aumento y
+//     posición medidos, no supuestos), se sabe dónde quedó el objetivo y, si quedó lejos, se corrige.
+//  4) El motor se mueve a saltos (no tiene pasos finos), así que el remate fino lo da el zoom digital del
+//     visor, centrado exactamente donde se midió el objetivo dentro de la imagen óptica.
+// El eje del zoom se mide en cada uso y se guarda por cámara en el servidor. Los pulsos los cronometra el
+// servidor, así duran lo pedido sin importar la red ni el dispositivo.
+const ZOOM_MS = 4000;                 // zoomIn continuo: sobra para llegar al tope del lente
+const ZW = 192, ZH = 108;             // resolución de trabajo para ubicar el objetivo
+const zCan = document.createElement('canvas'), zCtx = zCan.getContext('2d', { willReadFrequently: true });
+// Cuadro actual en grises (w×h), o null si no hay imagen (video sin arrancar, cuadro negro).
+function grabGray(w, h) {
+  if (!bigV.videoWidth || bigV.readyState < 2) return null;
+  if (zCan.width !== w || zCan.height !== h) { zCan.width = w; zCan.height = h; }
+  try { zCtx.drawImage(bigV, 0, 0, w, h); } catch (e) { return null; }
+  const d = zCtx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+  let s = 0, s2 = 0;
+  for (let i = 0; i < g.length; i++) { const v = d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11; g[i] = v; s += v; s2 += v * v; }
+  const m = s / g.length;
+  return s2 / g.length - m * m < 4 ? null : blur3(g, w, h);
 }
-// Desplazamiento (dx,dy) que mejor alinea "b" sobre "a": un punto en (x,y) de "a" cae en (x+dx,y+dy) de "b".
-// conf = qué tan marcado es el mínimo (bajo = escena plana/oscura, poco confiable). edge = se movió más de lo buscado.
-function imgShift(a, b, R) {
-  let best = Infinity, bx = 0, by = 0, sum = 0, cnt = 0;
-  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
-    let s = 0, n = 0;
-    for (let y = R; y < CAP_H - R; y += 3) {
-      const ra = y * CAP_W, rb = (y + dy) * CAP_W + dx;
-      for (let x = R; x < CAP_W - R; x += 3) { const df = a[ra + x] - b[rb + x]; s += df < 0 ? -df : df; n++; }
+// Suavizado 3×3: el video llega comprimido y con ruido (y mucho más en modo nocturno); sin esto la
+// comparación de recortes se confunde con el granulado.
+function blur3(g, w, h) {
+  const o = new Float32Array(g.length);
+  for (let y = 0; y < h; y++) {
+    const y0 = y > 0 ? y - 1 : y, y1 = y < h - 1 ? y + 1 : y;
+    for (let x = 0; x < w; x++) {
+      const x0 = x > 0 ? x - 1 : x, x1 = x < w - 1 ? x + 1 : x;
+      o[y * w + x] = (g[y0 * w + x0] + g[y0 * w + x] + g[y0 * w + x1] + g[y * w + x0] + g[y * w + x] + g[y * w + x1] + g[y1 * w + x0] + g[y1 * w + x] + g[y1 * w + x1]) / 9;
     }
-    s /= n; sum += s; cnt++;
-    if (s < best) { best = s; bx = dx; by = dy; }
   }
-  const mean = sum / cnt;
-  return { fx: bx / CAP_W, fy: by / CAP_H, conf: mean > 0 ? (mean - best) / mean : 0, edge: Math.abs(bx) === R || Math.abs(by) === R };
+  return o;
 }
-function measureMove(a, b) { let m = imgShift(a, b, 26); if (m.edge) m = imgShift(a, b, 50); return m; }
-
+// Plantilla con media cero, para correlación normalizada (no le afectan los cambios de brillo).
+function tmpl(src, sw, x0, y0, tw, th) {
+  const Z = new Float32Array(tw * th); let m = 0, n = 0;
+  for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) { const v = src[(y0 + y) * sw + x0 + x]; Z[y * tw + x] = v; m += v; }
+  m /= Z.length;
+  for (let i = 0; i < Z.length; i++) { Z[i] -= m; n += Z[i] * Z[i]; }
+  return { Z, tw, th, n: Math.sqrt(n) || 1 };
+}
+// Busca la plantilla T dentro de la imagen I (ZW×ZH): esquina de mejor correlación y su valor (-1..1).
+// prior = { x, y, rx, ry } (esquina esperada y radios, en píxeles): busca sólo ahí y, entre coincidencias
+// parecidas, prefiere la más cercana a lo esperado (en escenas repetidas, como un estante, evita saltar a un
+// cajón vecino idéntico).
+function nccFind(I, T, x0 = 0, x1 = 1e9, y0 = 0, y1 = 1e9, step = 2, prior = null) {
+  if (prior) { x0 = prior.x - prior.rx; x1 = prior.x + prior.rx; y0 = prior.y - prior.ry; y1 = prior.y + prior.ry; }
+  x0 = Math.max(0, Math.round(x0)); y0 = Math.max(0, Math.round(y0));
+  x1 = Math.min(ZW - T.tw, Math.round(x1)); y1 = Math.min(ZH - T.th, Math.round(y1));
+  const n = T.tw * T.th; let best = { s: -2, a: -9, x: x0, y: y0 };
+  const one = (ox, oy) => {
+    let sw = 0, sww = 0, swt = 0;
+    for (let y = 0; y < T.th; y++) {
+      const r = (oy + y) * ZW + ox, tr = y * T.tw;
+      for (let x = 0; x < T.tw; x++) { const w = I[r + x]; sw += w; sww += w * w; swt += w * T.Z[tr + x]; }
+    }
+    const s = swt / (Math.sqrt(Math.max(sww - sw * sw / n, 1e-6)) * T.n);
+    const a = prior ? s - 0.35 * (((ox - prior.x) / (prior.rx + 1)) ** 2 + ((oy - prior.y) / (prior.ry + 1)) ** 2) : s;
+    if (a > best.a) best = { s, a, x: ox, y: oy };
+  };
+  for (let oy = y0; oy <= y1; oy += step) for (let ox = x0; ox <= x1; ox += step) one(ox, oy);
+  if (step > 1) { const b = best; for (let oy = b.y - step + 1; oy <= b.y + step - 1; oy++) for (let ox = b.x - step + 1; ox <= b.x + step - 1; ox++) if (ox >= x0 && ox <= x1 && oy >= y0 && oy <= y1) one(ox, oy); }
+  return best;
+}
+// Dónde cae la vista actual (acercada) dentro de la foto W tomada sin zoom: aumento real y centro.
+// prior = { cx, cy, rx, ry } en fracciones de W: dónde debería estar el centro de la vista.
+function findView(W, zGuess, prior = null) {
+  let best = { s: -2 };
+  const tryZ = (Z, near) => {
+    const tw = Math.round(ZW / Z), th = Math.round(ZH / Z);
+    const F = grabGray(tw, th); if (!F) return;
+    const T = tmpl(F, tw, 0, 0, tw, th);
+    const b = near ? nccFind(W, T, near.x - tw / 2 - 4, near.x - tw / 2 + 4, near.y - th / 2 - 4, near.y - th / 2 + 4, 1)
+      : nccFind(W, T, 0, 1e9, 0, 1e9, 2, prior && { x: prior.cx * ZW - tw / 2, y: prior.cy * ZH - th / 2, rx: prior.rx * ZW, ry: prior.ry * ZH });
+    if (b.s > best.s) best = { s: b.s, Z: ZW / tw, cx: b.x + tw / 2, cy: b.y + th / 2 };
+  };
+  const zr = prior ? 0.3 : zGuess >= 3.85 ? 0.6 : 1;          // con el zoom al tope el aumento se conoce bien
+  for (let Z = Math.max(1.3, zGuess - zr); Z <= zGuess + zr + 0.01; Z += 0.15) tryZ(Z);
+  if (best.s < -1) return null;
+  const c = best;
+  for (let Z = c.Z - 0.2; Z <= c.Z + 0.21; Z += 0.05) tryZ(Z, { x: c.cx, y: c.cy });
+  return { Z: best.Z, cx: best.cx / ZW, cy: best.cy / ZH, s: best.s };
+}
 let centering = false;
 let acDebug = [];  // registro del último centrado (para diagnóstico)
-async function autoCenter(cam, tx, ty) {
+// Curva del lente (medida): ~1,85× tras 1 s de zoomIn y ~3,9× (tope) a los 2 s.
+const zoomMsFor = (Z) => (Z >= 3.85 ? ZOOM_MS : Z <= 1.85 ? 1000 * (Z - 1) / 0.85 : 1000 + 1000 * (Z - 1.85) / 2);
+// zUser: el aumento que pedía el recuadro dibujado (para el remate con zoom digital).
+async function autoCenter(cam, tx, ty, zUser = 2) {
   acDebug = [];
-  const ch = cam.channel, clamp = (lo, hi, v) => Math.max(lo, Math.min(hi, v)), sgn = Math.sign;
-  const send = (a, sp) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: ch, action: a, speed: sp }) }).catch(() => {});
-  const pulse = async (a, ms, sp) => { await send(a, sp); await sleep(ms); await send('stop', sp); await sleep(750); };
-  const step = async (action, ms, sp) => {
-    const a = capGray(); if (!a) return null;
-    await pulse(action, ms, sp);
-    const b = capGray(); if (!b) return null;
-    const m = measureMove(a, b);
-    acDebug.push({ action, ms: Math.round(ms), sp, fx: +m.fx.toFixed(3), fy: +m.fy.toFixed(3), conf: +m.conf.toFixed(2), edge: m.edge });
-    return m;
+  const ch = cam.channel, clamp = (lo, hi, v) => Math.max(lo, Math.min(hi, v)), r3 = (v) => Math.round(v * 1000) / 1000;
+  const log = (o) => acDebug.push(o);
+  const ptzPost = (body) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: ch, ...body }) });
+  const pulse = async (a, ms, sp) => {
+    const t0 = performance.now();
+    const r = await ptzPost({ action: a, speed: sp, ms: Math.round(ms) }).then((x) => x.json()).catch(() => null);
+    if (!r || !r.ms) {                     // el servidor no cronometró el pulso (o falló el pedido): parar desde acá
+      await sleep(Math.max(0, ms - (performance.now() - t0)));
+      await ptzPost({ action: 'stop', speed: sp }).catch(() => {});
+    }
   };
-  const WSP = cam.ptzSpeed || 3;   // velocidad en gran angular (suave)
-  const TOL = 0.03, CONF = 0.08;
-  // Sólo aceptamos la medición si el movimiento coincide con el pulso que mandamos:
-  // un "derecha" tiene que correr la imagen a la izquierda y sobre todo en horizontal.
-  // Así se descartan las coincidencias falsas sobre follaje repetitivo, que apuntan a cualquier lado.
-  const axisOK = (m, dir) => {
-    const ax = Math.abs(m.fx), ay = Math.abs(m.fy);
-    if (dir === 'left') return m.fx > 0.012 && ax >= ay * 1.2;
-    if (dir === 'right') return m.fx < -0.012 && ax >= ay * 1.2;
-    if (dir === 'up') return m.fy > 0.015 && ay >= ax * 1.2;
-    return m.fy < -0.015 && ay >= ax * 1.2; // down
+  const frame = async () => { for (let k = 0; k < 12; k++) { const g = grabGray(ZW, ZH); if (g) return g; await sleep(250); } return null; };
+  // Después de un pulso: esperar a que la imagen quede quieta (medido: el movimiento recién aparece en el video
+  // ~1,1-1,4 s después del pulso) y devolver lo que mide `measure` ya quieto.
+  const settle = async (measure, same, wait = 1300) => {
+    await sleep(wait);
+    let a = measure(), ok = 0;
+    for (let k = 0; k < 8; k++) { await sleep(350); const b = measure(); if (a && b && same(a, b)) { if (++ok >= 2) return b; } else ok = 0; a = b; }
+    return a;
   };
-  let px = tx, py = ty, hFlip = 1, vFlip = 1, hFlipped = false, vFlipped = false, vDone = false;
-  let gx = 0.0006;              // ganancia horizontal (fracción de cuadro por ms); se autoajusta al medir cada pulso
-  let upMs = 400, downMs = 300; // pulsos verticales gruesos; escalan si el motor no arranca
-  let wHSp = WSP, wVSp = WSP;   // velocidades que suben si un pulso no vence el roce (cada cámara trae su velocidad)
-  // --- Fase A: centrar en gran angular (el blanco es el centro del recuadro) ---
-  let stall = 0;
-  for (let it = 0; it < 14 && stall < 2; it++) {
-    const ex = px - 0.5, ey = py - 0.5;
-    const needX = Math.abs(ex) > TOL, needY = !vDone && Math.abs(ey) > 0.09;
-    if (!needX && !needY) break;
-    let moved = 0, bumped = false;
-    if (needX && (!needY || Math.abs(ex) >= Math.abs(ey) * 0.7)) {      // horizontal: suave, con ganancia adaptativa
-      const dir = (ex > 0) === (hFlip > 0) ? 'right' : 'left';
-      const ms = clamp(250, 900, Math.abs(ex) * 0.6 / gx);
-      const m = await step(dir, ms, wHSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) {
-        gx = 0.6 * gx + 0.4 * (Math.abs(m.fx) / ms);
-        const nx = clamp(0, 1, px + m.fx);
-        if (!hFlipped && sgn(nx - 0.5) === sgn(ex) && Math.abs(nx - 0.5) > Math.abs(ex) + 0.03) { hFlip = -hFlip; hFlipped = true; }
-        moved = Math.abs(m.fx); px = nx;
-      } else if (Math.abs(m.fx) < 0.02 && wHSp < 8) { wHSp++; bumped = true; }   // no venció el roce: más velocidad
-    } else {                                                           // vertical: a saltos gruesos, sólo acercar al centro
-      const up = (ey < 0) === (vFlip > 0), dir = up ? 'up' : 'down';
-      const m = await step(dir, up ? upMs : downMs, wVSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) {
-        const ny = clamp(0, 1, py + m.fy);
-        if (!vFlipped && sgn(ny - 0.5) === sgn(ey) && Math.abs(ny - 0.5) > Math.abs(ey) + 0.03) { vFlip = -vFlip; vFlipped = true; }
-        moved = Math.abs(m.fy); py = ny;
-        if (Math.abs(ny - 0.5) <= 0.09 || sgn(ny - 0.5) !== sgn(ey)) vDone = true;  // llegó/cruzó el centro: el vertical ya está, seguir con el horizontal
-      } else if (Math.abs(m.fy) < 0.02) {                              // no se movió
-        if (up && upMs < 950) { upMs = clamp(260, 950, upMs + 180); bumped = true; }  // zona muerta de "arriba": pulso más largo
-        else if (wVSp < 8) { wVSp++; bumped = true; }                  // o más velocidad
+  // Recorte del objetivo alrededor del punto marcado.
+  const PW = 44, PH = 30;
+  const px0 = clamp(0, ZW - PW, Math.round(tx * ZW - PW / 2)), py0 = clamp(0, ZH - PH, Math.round(ty * ZH - PH / 2));
+  const off = { x: tx * ZW - px0, y: ty * ZH - py0 };
+  let T = null, T0 = null, p = null;
+  // Buscar el objetivo en la imagen actual. La gran angular deforma hacia los bordes, así que con cada
+  // ubicación confiable se renueva el recorte (sigue al objetivo aunque cambie de aspecto al girar).
+  const findT = (minS = 0.5, prior = null, tpl = null) => {
+    const F = grabGray(ZW, ZH); if (!F) return null;
+    const b = nccFind(F, tpl || T, 0, 1e9, 0, 1e9, 2, prior && { x: prior.x * ZW - off.x, y: prior.y * ZH - off.y, rx: prior.rx * ZW, ry: prior.ry * ZH });
+    if (b.s < minS) return null;
+    if (b.s > 0.6) T = tmpl(F, ZW, b.x, b.y, PW, PH);
+    return { x: (b.x + off.x) / ZW, y: (b.y + off.y) / ZH, s: b.s };
+  };
+  // La foto del punto: si la imagen todavía se estaba acomodando (exposición, ruido), reintentar.
+  for (let k = 0; k < 4 && !p; k++) {
+    const W0 = await frame(); if (!W0) break;
+    T = T0 = tmpl(W0, ZW, px0, py0, PW, PH);
+    await sleep(300);
+    p = findT(0.6, { x: tx, y: ty, rx: 0.06, ry: 0.08 });
+  }
+  log({ phase: 'start', x: r3(tx), y: r3(ty), s: p && +p.s.toFixed(2), axis: cam.zoomAxis });
+  if (!p) throw new Error('no reconozco el punto');
+  const axis = Array.isArray(cam.zoomAxis) ? cam.zoomAxis : [0.47, 0.51];   // si aún no se midió: el promedio de estas cámaras
+  const SP = 4;
+  // Efecto de cada comando sobre la posición del objetivo en pantalla ("derecha" corre la imagen, así que
+  // el objetivo va a la izquierda; "abajo" lo sube). hInv/vInv = -1 si el motor resulta girar al revés.
+  const sense = { right: -1, left: 1, down: -1, up: 1 };
+  let hInv = 1, vInv = 1;
+  // Medido: estos motores se mueven A SALTOS. Sin zoom, el movimiento más chico posible es ~0,065 del cuadro
+  // en horizontal y ~0,2 en vertical; un pulso demasiado corto no arranca (depende de la cámara) y uno largo
+  // avanza de corrido. Así que: si falta mucho, pulso largo; si falta poco, el pulso mínimo que arranca; y si
+  // falta menos de medio salto, no se toca (sólo se pasaría al otro lado y oscilaría).
+  const st = { step: { h: 0.065, v: 0.2 }, rate: { h: 0.0003, v: 0.0007 }, minMs: { h: 80, v: 120 }, side: 0.06, still: 0.006, wait: 1300, stuck: { h: 0, v: 0 }, blocked: { h: false, v: false } };
+  let lost = false;
+  const move = async (horiz, err, before, pos, same) => {
+    const ax = horiz ? 'h' : 'v', inv = horiz ? hInv : vInv;
+    const want = -err;                                           // hay que llevar el objetivo en contra del error
+    const dir = horiz ? (Math.sign(want) === sense.left * inv ? 'left' : 'right') : (Math.sign(want) === sense.up * inv ? 'up' : 'down');
+    const big = Math.abs(err) > 2 * st.step[ax];
+    const ms = big ? clamp(st.minMs[ax], 1500, (Math.abs(err) * 0.8 - st.step[ax]) / st.rate[ax] + st.minMs[ax]) : st.minMs[ax];
+    await pulse(dir, ms, SP);
+    // Dónde debería quedar: a lo largo del eje, desde "no se movió" hasta bastante más de lo esperado; de costado, poco.
+    const exp = Math.sign(want) * (big ? Math.abs(err) * 0.8 : st.step[ax]);
+    const along = Math.abs(exp) * 0.7 + 0.08;
+    const prior = horiz ? { x: before.x + exp * 0.5, y: before.y, rx: along, ry: st.side } : { x: before.x, y: before.y + exp * 0.5, rx: st.side, ry: along };
+    let q = await settle(() => pos(0.5, prior), same, st.wait);
+    if (!q) { await sleep(300); q = pos(0.4, null); }           // perdido: buscar en toda la imagen
+    const rec = { dir, ms: Math.round(ms), err: r3(err) };
+    if (!q) { log({ ...rec, lost: true }); lost = true; return null; }
+    const d = horiz ? q.x - before.x : q.y - before.y;
+    log({ ...rec, d: r3(d), x: r3(q.x), y: r3(q.y), s: +q.s.toFixed(2) });
+    if (Math.abs(d) < st.still) {                                // no arrancó: pulso mínimo más largo; si ni así, tope de giro
+      if (ms >= 500 && ++st.stuck[ax] >= 2) st.blocked[ax] = true;
+      st.minMs[ax] = Math.min(800, Math.round(st.minMs[ax] * 2));
+    } else {
+      st.stuck[ax] = 0;
+      if (Math.sign(d) !== Math.sign(want) && Math.abs(d) > 3 * st.still) { if (horiz) hInv = -hInv; else vInv = -vInv; }   // gira al revés
+      else if (!big) st.step[ax] = clamp(0.02, 0.6, 0.5 * st.step[ax] + 0.5 * Math.abs(d));   // tamaño real del salto
+      else st.rate[ax] = clamp(0.00003, 0.004, 0.5 * st.rate[ax] + 0.5 * Math.max(0, Math.abs(d) - st.step[ax]) / Math.max(1, ms - st.minMs[ax]));
+    }
+    return q;
+  };
+  // Llevar el objetivo hacia `aim` sin oscilar: un eje se da por terminado cuando lo que falta es menos de
+  // medio salto, cuando llegó al tope de giro, o cuando el último movimiento lo dejó peor (se vuelve atrás).
+  const centerLoop = async (p, aim, pos, same, maxMoves) => {
+    const done = { h: false, v: false };
+    for (let it = 0; it < maxMoves && p && !(done.h && done.v); it++) {
+      const ex = p.x - aim[0], ey = p.y - aim[1];
+      if (Math.abs(ex) < 0.55 * st.step.h || st.blocked.h) done.h = true;
+      if (Math.abs(ey) < 0.55 * st.step.v || st.blocked.v) done.v = true;
+      if (done.h && done.v) break;
+      const horiz = !done.h && (done.v || Math.abs(ex) / st.step.h >= Math.abs(ey) / st.step.v);
+      const e0 = horiz ? ex : ey;
+      const q = await move(horiz, e0, p, pos, same);
+      if (!q) return null;
+      const e1 = horiz ? q.x - aim[0] : q.y - aim[1];
+      if (Math.sign(e1) !== Math.sign(e0) && Math.abs(e1) >= Math.abs(e0)) {   // se pasó y quedó peor: volver
+        const back = await move(horiz, e1, q, pos, same);
+        if (!back) return null;
+        p = back; done[horiz ? 'h' : 'v'] = true; continue;
       }
+      if (Math.sign(e1) !== Math.sign(e0)) done[horiz ? 'h' : 'v'] = true;    // cruzó el objetivo y quedó mejor: listo
+      p = q;
     }
-    stall = (moved < 0.01 && !bumped) ? stall + 1 : 0;
-  }
-  // --- Fase B: todo el zoom óptico (el blanco quedó ~centrado y el zoom lo mantiene) ---
-  await pulse('zoomIn', PTZ_ZOOM_FULL_MS, WSP);
-  acDebug.push({ phase: 'zoom', px: +px.toFixed(3), py: +py.toFixed(3) });
-  // --- Fase C: ajuste fino con el lente acercado. Acercado el motor es lento y pegajoso, así que si un
-  // pulso no mueve se sube la velocidad (vence el roce) y se mide; el lazo corrige los saltos. El residuo
-  // del gran angular se amplió ~×factor en el mismo sentido, de ahí arranca la estimación.
-  let zx = clamp(0.04, 0.96, 0.5 + (px - 0.5) * PTZ_ZOOM_FACTOR), zy = clamp(0.04, 0.96, 0.5 + (py - 0.5) * PTZ_ZOOM_FACTOR);
-  // Tope de correcciones por eje: en escenas muy lisas o repetitivas (una pared, un piso de baldosas)
-  // la medición se vuelve poco fiable; el tope evita que la cámara se vaya lejos persiguiendo datos malos.
-  let hSp = 4, vSp = 4, hMoves = 0, vMoves = 0; stall = 0;
-  for (let it = 0; it < 12 && stall < 2; it++) {
-    const ex = zx - 0.5, ey = zy - 0.5;
-    const canX = Math.abs(ex) > TOL && hMoves < 4, canY = Math.abs(ey) > TOL && vMoves < 4;
-    if (!canX && !canY) break;
-    let moved = 0, bumped = false;
-    if (canX && (!canY || Math.abs(ex) >= Math.abs(ey))) {             // horizontal
-      const dir = (ex > 0) === (hFlip > 0) ? 'right' : 'left';
-      const m = await step(dir, clamp(220, 600, Math.abs(ex) * 900), hSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) { moved = Math.abs(m.fx); zx = clamp(0, 1, zx + m.fx); hMoves++; }
-      else if (Math.abs(m.fx) < 0.02 && hSp < 6) { hSp++; bumped = true; } // no venció el roce: más velocidad
-    } else {                                                            // vertical: bajar es suave, subir es pegajoso; el lazo corrige
-      const down = (ey > 0) === (vFlip > 0);
-      const dir = down ? (vFlip > 0 ? 'down' : 'up') : (vFlip > 0 ? 'up' : 'down');
-      const m = await step(dir, clamp(250, 520, 150 + Math.abs(ey) * 800), vSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) { moved = Math.abs(m.fy); zy = clamp(0, 1, zy + m.fy); vMoves++; }
-      else if (Math.abs(m.fy) < 0.02 && vSp < 6) { vSp++; bumped = true; } // no venció el roce: más velocidad
+    return p;
+  };
+  const nearT = (a, b) => Math.abs(a.x - b.x) < 0.006 && Math.abs(a.y - b.y) < 0.008;
+  // --- 1) Sin zoom: llevar el objetivo al eje del zoom de esta cámara ---
+  const pA = await centerLoop(p, axis, findT, nearT, 10);
+  if (!pA) throw new Error('perdí el punto');                  // no acercar a ciegas (queda "Volver")
+  // --- 2) Acercar: foto justo antes, zoom y ubicar la vista acercada dentro de esa foto ---
+  const W2 = await frame(); if (!W2) throw new Error('sin imagen');
+  const pz = findT(0.55, { x: pA.x, y: pA.y, rx: 0.05, ry: 0.06 }) || pA;   // posición del objetivo en esa foto
+  // Si un eje quedó al tope de giro y el objetivo no llegó al eje del zoom, todo el zoom lo sacaría del cuadro:
+  // se acerca sólo lo que permite tenerlo a la vista (el remate digital lo centra).
+  const far = Math.max(Math.abs(pz.x - axis[0]), Math.abs(pz.y - axis[1]));
+  const Zt = (st.blocked.h || st.blocked.v) && far * 3.9 > 0.25 ? clamp(1.3, 3.9, 0.25 / far) : 3.9;
+  log({ phase: 'preZoom', x: r3(pz.x), y: r3(pz.y), blocked: st.blocked, Zt: +Zt.toFixed(2) });
+  await pulse('zoomIn', zoomMsFor(Zt), SP);
+  await sleep(1500);                        // que enfoque
+  const viewNear = (a, b) => Math.abs(a.cx - b.cx) < 0.004 && Math.abs(a.cy - b.cy) < 0.005;
+  let lastV = null;
+  const v = await settle(() => (lastV = findView(W2, lastV ? lastV.Z : Zt, lastV && lastV.s > 0.6 ? { cx: lastV.cx, cy: lastV.cy, rx: 0.06, ry: 0.06 } : null)), viewNear);
+  log({ phase: 'zoom', Z: v && +v.Z.toFixed(2), cx: v && r3(v.cx), cy: v && r3(v.cy), s: v && +v.s.toFixed(2) });
+  if (!v || v.s < 0.5) { log({ phase: 'done', noView: true }); return null; }
+  // Sin movimiento desde la foto, el centro de la vista acercada ES el eje del zoom: aprenderlo para la próxima
+  // (sólo con el zoom al tope y si es coherente con lo que ya se sabía).
+  const oldA = Array.isArray(cam.zoomAxis) ? cam.zoomAxis : null;
+  if (Zt >= 3.85 && v.s > 0.6 && (!oldA || (Math.abs(v.cx - oldA[0]) < 0.04 && Math.abs(v.cy - oldA[1]) < 0.04))) {
+    const nw = oldA ? [0.7 * oldA[0] + 0.3 * v.cx, 0.7 * oldA[1] + 0.3 * v.cy] : [v.cx, v.cy];
+    if (nw.every((x) => x > 0.3 && x < 0.7)) {
+      cam.zoomAxis = nw.map(r3);
+      fetch('/api/camera-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: ch, zoomAxis: cam.zoomAxis }) }).catch(() => {});
     }
-    stall = (moved < 0.01 && !bumped) ? stall + 1 : 0;
   }
-  acDebug.push({ phase: 'done', zx: +zx.toFixed(3), zy: +zy.toFixed(3) });
+  // --- 3) Con zoom: el objetivo está en 0,5 + (pz − centro de la vista) × aumento. Si quedó fuera de lo que
+  // puede corregir el zoom digital (~0,32 del centro), traerlo con el motor. ---
+  const where = (minS = 0.5, pr = null) => { const w = findView(W2, v.Z, pr && { cx: pz.x - (pr.x - 0.5) / v.Z, cy: pz.y - (pr.y - 0.5) / v.Z, rx: pr.rx / v.Z, ry: pr.ry / v.Z }); return w && w.s > Math.max(0.45, minS - 0.05) ? { x: 0.5 + (pz.x - w.cx) * w.Z, y: 0.5 + (pz.y - w.cy) * w.Z, s: w.s } : null; };
+  const nearQ = (a, b) => Math.abs(a.x - b.x) < 0.02 && Math.abs(a.y - b.y) < 0.025;
+  let q = { x: 0.5 + (pz.x - v.cx) * v.Z, y: 0.5 + (pz.y - v.cy) * v.Z, s: v.s };
+  log({ at: 'zoomed', x: r3(q.x), y: r3(q.y) });
+  if (Math.abs(q.x - 0.5) > 0.32 || Math.abs(q.y - 0.5) > 0.32) {
+    // Acercado los saltos son otros: se arranca con el de gran angular escalado y se mide.
+    st.step.h = Math.min(0.3, st.step.h * 2); st.step.v = Math.min(0.5, st.step.v * 1.5);
+    st.minMs.h = Math.max(150, st.minMs.h); st.minMs.v = Math.max(200, st.minMs.v);
+    st.rate.h *= 2; st.rate.v *= 2; st.side = 0.15; st.still = 0.015; st.stuck = { h: 0, v: 0 };
+    st.wait = 2300;                          // acercado el vertical "se pega" más antes de soltarse: esperar más
+    const qc = await centerLoop(q, [0.5, 0.5], where, nearQ, 3);
+    const qf = await settle(() => where(0.5, qc ? { x: qc.x, y: qc.y, rx: 0.2, ry: 0.2 } : null), nearQ, 1500);   // medir otra vez, ya quieto
+    q = qf || qc || q;
+  }
+  // --- 4) Remate con zoom digital centrado exactamente en el objetivo medido ---
+  const ex = q.x - 0.5, ey = q.y - 0.5, need = 1 / Math.max(0.2, 1 - 2 * Math.max(Math.abs(ex), Math.abs(ey)));
+  const zd = clamp(1, 3, Math.max(zUser / v.Z, need + 0.05));
+  log({ phase: 'done', x: r3(q.x), y: r3(q.y), zd: +zd.toFixed(2) });
+  return { x: q.x, y: q.y, zd };
 }
 $('#areaOptical').addEventListener('click', async () => {
   const cam = cameras[cur]; if (!cam || !cam.ptz || centering) return;
-  const cx = area.cx, cy = area.cy;
+  const cx = area.cx, cy = area.cy, zUser = area.z;
   areaReset(); // la cámara va a encuadrar de verdad, así que sacamos el zoom digital
   centering = true;
   // Guardar la posición actual para poder volver con un toque (se espera un momento a que la cámara la guarde).
   try { await presetReq({ channel: cam.channel, op: 'mark' }); await sleep(900); $('#backPos').style.display = ''; } catch (e) {}
   toast('Centrando la cámara…', 4000);
-  try { await autoCenter(cam, cx, cy); toast('Listo', 1500); }
-  catch (e) { toast('No se pudo centrar del todo', 3000); }
+  try {
+    const r = await autoCenter(cam, cx, cy, zUser);
+    // Remate: zoom digital centrado justo en el objetivo (el motor no tiene pasos finos; la imagen sí).
+    if (r && cur >= 0 && cameras[cur] === cam && r.zd > 1.02) {
+      const h = 0.5 / r.zd;
+      area.z = r.zd; area.cx = Math.min(1 - h, Math.max(h, r.x)); area.cy = Math.min(1 - h, Math.max(h, r.y)); areaApply();
+    }
+    toast(r ? 'Listo' : 'Acercado; no pude ubicar el punto con precisión', r ? 1500 : 3500);
+  }
+  catch (e) { toast(e && e.message === 'no reconozco el punto' ? 'Ese punto no tiene detalle suficiente para seguirlo' : 'No se pudo centrar del todo', 3500); }
   finally { centering = false; }
 });
 $('#backPos').addEventListener('click', async () => {
