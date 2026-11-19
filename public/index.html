@@ -1123,97 +1123,115 @@ function measureMove(a, b) { let m = imgShift(a, b, 26); if (m.edge) m = imgShif
 
 let centering = false;
 let acDebug = [];  // registro del último centrado (para diagnóstico)
+// Centrado por imagen. Dos reglas que lo hacen robusto en cualquier cámara:
+//  1) Cada pulso se dimensiona para mover POCO (dentro de la ventana que la correlación puede medir);
+//     si un pulso mueve de más, la medición "aliasa" y da basura (izquierda y derecha medirían igual).
+//  2) A una medición limpia y en rango se le cree SIEMPRE: la imagen se movió de verdad, así que el
+//     blanco se movió por (fx,fy) aunque el motor se haya desviado de eje. Nunca se repite un pulso
+//     que desvió la imagen; eso era lo que mandaba el encuadre "a cualquier lado" con el zoom puesto.
 async function autoCenter(cam, tx, ty) {
   acDebug = [];
   const ch = cam.channel, clamp = (lo, hi, v) => Math.max(lo, Math.min(hi, v)), sgn = Math.sign;
   const send = (a, sp) => fetch('/api/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: ch, action: a, speed: sp }) }).catch(() => {});
-  const pulse = async (a, ms, sp) => { await send(a, sp); await sleep(ms); await send('stop', sp); await sleep(750); };
-  const step = async (action, ms, sp) => {
+  const pulse = async (a, ms, sp) => { await send(a, sp); await sleep(ms); await send('stop', sp); await sleep(850); };
+  const CONF = 0.3;        // confianza mínima para CREERLE a una medición (los movimientos reales dan 0.4-0.9;
+                           // las coincidencias falsas sobre escenas lisas dan <0.3 y hay que descartarlas,
+                           // o mandan el encuadre al lado equivocado). Si no se puede medir, se frena y no se acerca.
+  const MAXSTEP = 0.17;    // no pedir más de 0.17 de cuadro por pulso (la ventana mide hasta ~0.31)
+  let px = tx, py = ty;    // posición estimada del blanco en pantalla (0..1), se actualiza con cada medición
+  let budget = 26, hDead = false, vDead = false;   // tope de pulsos total y memoria de eje trabado (no re-intentar en cada tramo)
+  // Mide un pulso en un eje (axis 'h'/'v') y actualiza SÓLO ese eje, y sólo si ese eje domina el
+  // movimiento medido: con pulsos chicos la dirección es fiable, así que una medición que apunta al
+  // otro eje es una coincidencia falsa (p.ej. una pared con líneas repetidas) y se descarta.
+  const doStep = async (action, ms, sp, axis) => {
+    budget--;
     const a = capGray(); if (!a) return null;
     await pulse(action, ms, sp);
     const b = capGray(); if (!b) return null;
     const m = measureMove(a, b);
-    acDebug.push({ action, ms: Math.round(ms), sp, fx: +m.fx.toFixed(3), fy: +m.fy.toFixed(3), conf: +m.conf.toFixed(2), edge: m.edge });
-    return m;
-  };
-  const WSP = cam.ptzSpeed || 3;   // velocidad en gran angular (suave)
-  const TOL = 0.03, CONF = 0.08;
-  // Sólo aceptamos la medición si el movimiento coincide con el pulso que mandamos:
-  // un "derecha" tiene que correr la imagen a la izquierda y sobre todo en horizontal.
-  // Así se descartan las coincidencias falsas sobre follaje repetitivo, que apuntan a cualquier lado.
-  const axisOK = (m, dir) => {
     const ax = Math.abs(m.fx), ay = Math.abs(m.fy);
-    if (dir === 'left') return m.fx > 0.012 && ax >= ay * 1.2;
-    if (dir === 'right') return m.fx < -0.012 && ax >= ay * 1.2;
-    if (dir === 'up') return m.fy > 0.015 && ay >= ax * 1.2;
-    return m.fy < -0.015 && ay >= ax * 1.2; // down
+    const zero = ax < 0.02 && ay < 0.02;                                    // el motor no arrancó
+    const onAxis = axis === 'h' ? (ax >= ay * 1.3 && ax > 0.02) : (ay >= ax * 1.3 && ay > 0.02);
+    const valid = !m.edge && m.conf > CONF && onAxis;                       // medición creíble para este eje
+    const d = axis === 'h' ? m.fx : m.fy;                                   // desplazamiento en el eje mandado
+    if (valid) { if (axis === 'h') px = clamp(0, 1, px + m.fx); else py = clamp(0, 1, py + m.fy); }
+    acDebug.push({ action, ms: Math.round(ms), sp, fx: +m.fx.toFixed(3), fy: +m.fy.toFixed(3), conf: +m.conf.toFixed(2), edge: m.edge, ok: valid, px: +px.toFixed(3), py: +py.toFixed(3) });
+    return { m, valid, zero, d, edge: m.edge };
   };
-  let px = tx, py = ty, hFlip = 1, vFlip = 1, hFlipped = false, vFlipped = false, vDone = false;
-  let gx = 0.0006;              // ganancia horizontal (fracción de cuadro por ms); se autoajusta al medir cada pulso
-  let upMs = 400, downMs = 300; // pulsos verticales gruesos; escalan si el motor no arranca
-  let wHSp = WSP, wVSp = WSP;   // velocidades que suben si un pulso no vence el roce (cada cámara trae su velocidad)
-  // --- Fase A: centrar en gran angular (el blanco es el centro del recuadro) ---
-  let stall = 0;
-  for (let it = 0; it < 14 && stall < 2; it++) {
-    const ex = px - 0.5, ey = py - 0.5;
-    const needX = Math.abs(ex) > TOL, needY = !vDone && Math.abs(ey) > 0.09;
-    if (!needX && !needY) break;
-    let moved = 0, bumped = false;
-    if (needX && (!needY || Math.abs(ex) >= Math.abs(ey) * 0.7)) {      // horizontal: suave, con ganancia adaptativa
-      const dir = (ex > 0) === (hFlip > 0) ? 'right' : 'left';
-      const ms = clamp(250, 900, Math.abs(ex) * 0.6 / gx);
-      const m = await step(dir, ms, wHSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) {
-        gx = 0.6 * gx + 0.4 * (Math.abs(m.fx) / ms);
-        const nx = clamp(0, 1, px + m.fx);
-        if (!hFlipped && sgn(nx - 0.5) === sgn(ex) && Math.abs(nx - 0.5) > Math.abs(ex) + 0.03) { hFlip = -hFlip; hFlipped = true; }
-        moved = Math.abs(m.fx); px = nx;
-      } else if (Math.abs(m.fx) < 0.02 && wHSp < 8) { wHSp++; bumped = true; }   // no venció el roce: más velocidad
-    } else {                                                           // vertical: a saltos gruesos, sólo acercar al centro
-      const up = (ey < 0) === (vFlip > 0), dir = up ? 'up' : 'down';
-      const m = await step(dir, up ? upMs : downMs, wVSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) {
-        const ny = clamp(0, 1, py + m.fy);
-        if (!vFlipped && sgn(ny - 0.5) === sgn(ey) && Math.abs(ny - 0.5) > Math.abs(ey) + 0.03) { vFlip = -vFlip; vFlipped = true; }
-        moved = Math.abs(m.fy); py = ny;
-        if (Math.abs(ny - 0.5) <= 0.09 || sgn(ny - 0.5) !== sgn(ey)) vDone = true;  // llegó/cruzó el centro: el vertical ya está, seguir con el horizontal
-      } else if (Math.abs(m.fy) < 0.02) {                              // no se movió
-        if (up && upMs < 950) { upMs = clamp(260, 950, upMs + 180); bumped = true; }  // zona muerta de "arriba": pulso más largo
-        else if (wVSp < 8) { wVSp++; bumped = true; }                  // o más velocidad
+  // Bucle de centrado genérico: sirve igual en gran angular y con el lente acercado.
+  const drive = async (o) => {
+    let hInv = false, vInv = false, hFlipped = false, vFlipped = false;    // sentido real del giro (se aprende por cámara)
+    let wrongH = 0, wrongV = 0;                                            // lecturas al revés seguidas (hace falta confirmar para invertir)
+    let gH = 0, gV = 0;                                                     // ganancia aprendida (cuadro por ms); 0 = aún no sé
+    let hSp = o.hSp0, vSp = o.vSp0, hMs = o.ms0, vMs = Math.round(o.ms0 * 1.3);
+    let stall = 0;
+    for (let it = 0; it < o.maxIter && stall < 3 && budget > 0; it++) {
+      const ex = px - 0.5, ey = py - 0.5;
+      // Tolerancia efectiva: si el paso más chico que el motor puede dar (ganancia × pulso mínimo) es
+      // grueso, no tiene sentido perseguir el centro más fino que medio paso: sólo se pasaría de largo
+      // y oscilaría. Con zoom en una cámara de salto grueso, esto deja el blanco "lo más centrado posible".
+      const tolX = Math.max(o.tol, gH > 0 ? 0.55 * gH * 120 : o.tol);
+      const tolY = Math.max(o.tol, gV > 0 ? 0.55 * gV * 120 : o.tol);
+      const needX = Math.abs(ex) > tolX && !hDead, needY = Math.abs(ey) > tolY && !vDead;
+      if (!needX && !needY) break;
+      let bumped = false;
+      if (needX && (!needY || Math.abs(ex) >= Math.abs(ey))) {             // --- horizontal ---
+        const want = clamp(0.02, MAXSTEP, Math.abs(ex));
+        const ms = gH > 0 ? clamp(120, 900, want / gH) : hMs;
+        const dir = (ex > 0) ? (hInv ? 'left' : 'right') : (hInv ? 'right' : 'left');
+        const r = await doStep(dir, ms, hSp, 'h'); if (!r) break;
+        if (r.valid) {
+          gH = gH > 0 ? 0.5 * gH + 0.5 * (Math.abs(r.d) / ms) : Math.abs(r.d) / ms;
+          const expect = dir === 'right' ? -1 : 1;                         // "derecha" debería dar fx<0
+          if (sgn(r.d) === expect) wrongH = 0;
+          else if (!hFlipped && ++wrongH >= 2) { hInv = !hInv; hFlipped = true; wrongH = 0; }  // confirmado al revés: invertir
+        } else if (r.edge) { gH = Math.max(gH, 0.31 / ms); bumped = true; }                      // saturó: la ganancia estaba subestimada → corregirla achica el próximo pulso
+        else if (r.zero) { if (hSp >= 8 && hMs >= 900) hDead = true; else { hSp = Math.min(8, hSp + 2); hMs = Math.round(clamp(150, 900, hMs * 1.6)); bumped = true; } }  // no arrancó: subir fuerza/largo; a tope → trabado
+        else hMs = Math.round(clamp(100, 900, hMs * 0.8));                  // se movió pero no se pudo medir en este eje: probar más chico
+        stall = (r.valid || bumped) ? 0 : stall + 1;
+      } else {                                                             // --- vertical ---
+        const want = clamp(0.02, MAXSTEP, Math.abs(ey));
+        const ms = gV > 0 ? clamp(120, 950, want / gV) : vMs;
+        const dir = (ey > 0) ? (vInv ? 'up' : 'down') : (vInv ? 'down' : 'up');
+        const r = await doStep(dir, ms, vSp, 'v'); if (!r) break;
+        if (r.valid) {
+          gV = gV > 0 ? 0.5 * gV + 0.5 * (Math.abs(r.d) / ms) : Math.abs(r.d) / ms;
+          const expect = dir === 'down' ? -1 : 1;                          // "abajo" debería dar fy<0
+          if (sgn(r.d) === expect) wrongV = 0;
+          else if (!vFlipped && ++wrongV >= 2) { vInv = !vInv; vFlipped = true; wrongV = 0; }
+        } else if (r.edge) { gV = Math.max(gV, 0.31 / ms); bumped = true; }                      // saturó: corregir la ganancia hacia arriba para achicar el próximo pulso
+        else if (r.zero) { if (vSp >= 8 && vMs >= 950) vDead = true; else { vSp = Math.min(8, vSp + 2); vMs = Math.round(clamp(220, 950, vMs * 1.5)); bumped = true; } }  // no arrancó: fuerza/largo; a tope → trabado
+        else vMs = Math.round(clamp(150, 950, vMs * 0.8));                  // se movió pero no medible en vertical: probar más chico
+        stall = (r.valid || bumped) ? 0 : stall + 1;
       }
     }
-    stall = (moved < 0.01 && !bumped) ? stall + 1 : 0;
+    // stuck: se quedó sin poder centrar (motor trabado/al tope o sin presupuesto); frena el zoom progresivo
+    return { ex: px - 0.5, ey: py - 0.5, stuck: stall >= 3 || budget <= 0 || (hDead && Math.abs(px - 0.5) > 0.1) || (vDead && Math.abs(py - 0.5) > 0.1) };
+  };
+  const WSP = cam.ptzSpeed || 4;
+  // Para centrar se usa una velocidad BAJA (no la del control manual): a velocidad alta cada pulso
+  // mueve demasiado (en una cámara con ptzSpeed 8, 300 ms salta ~30% del cuadro) y la medición
+  // aliasa y hasta invierte el signo. Con pasos chicos la dirección es fiable; si el motor no
+  // arranca, el bucle sube la velocidad solo.
+  const BSP = 3;
+  // --- Fase A: centrar en gran angular ---
+  let st = await drive({ tol: 0.05, maxIter: 18, hSp0: BSP, vSp0: BSP, ms0: 280 });
+  acDebug.push({ phase: 'preZoom', px: +px.toFixed(3), py: +py.toFixed(3), stuck: st.stuck });
+  // --- Fase B/C: zoom óptico PROGRESIVO. En vez de acercar todo de una (que amplificaría cualquier
+  // resto de descentrado hasta sacar el blanco del cuadro), acercamos por tramos y recentramos entre
+  // cada uno: así el blanco nunca se va lejos y la medición sigue siendo fiable. Si quedó muy
+  // descentrado y el motor ya no puede moverse más (tope de giro), dejamos de acercar en vez de
+  // mandar el encuadre a un rincón. ---
+  const CHUNKS = 3, fChunk = Math.pow(PTZ_ZOOM_FACTOR, 1 / CHUNKS);
+  for (let k = 0; k < CHUNKS; k++) {
+    if (st.stuck && (Math.abs(px - 0.5) > 0.06 || Math.abs(py - 0.5) > 0.06)) break;   // trabado y sin centrar: no acercar (amplificaría el error fuera del cuadro)
+    await pulse('zoomIn', PTZ_ZOOM_FULL_MS / CHUNKS, WSP);
+    px = clamp(0.02, 0.98, 0.5 + (px - 0.5) * fChunk);
+    py = clamp(0.02, 0.98, 0.5 + (py - 0.5) * fChunk);
+    acDebug.push({ phase: 'zoomStep', k, px: +px.toFixed(3), py: +py.toFixed(3) });
+    st = await drive({ tol: k === CHUNKS - 1 ? 0.03 : 0.05, maxIter: 12, hSp0: 4, vSp0: 4, ms0: 150 });
   }
-  // --- Fase B: todo el zoom óptico (el blanco quedó ~centrado y el zoom lo mantiene) ---
-  await pulse('zoomIn', PTZ_ZOOM_FULL_MS, WSP);
-  acDebug.push({ phase: 'zoom', px: +px.toFixed(3), py: +py.toFixed(3) });
-  // --- Fase C: ajuste fino con el lente acercado. Acercado el motor es lento y pegajoso, así que si un
-  // pulso no mueve se sube la velocidad (vence el roce) y se mide; el lazo corrige los saltos. El residuo
-  // del gran angular se amplió ~×factor en el mismo sentido, de ahí arranca la estimación.
-  let zx = clamp(0.04, 0.96, 0.5 + (px - 0.5) * PTZ_ZOOM_FACTOR), zy = clamp(0.04, 0.96, 0.5 + (py - 0.5) * PTZ_ZOOM_FACTOR);
-  // Tope de correcciones por eje: en escenas muy lisas o repetitivas (una pared, un piso de baldosas)
-  // la medición se vuelve poco fiable; el tope evita que la cámara se vaya lejos persiguiendo datos malos.
-  let hSp = 4, vSp = 4, hMoves = 0, vMoves = 0; stall = 0;
-  for (let it = 0; it < 12 && stall < 2; it++) {
-    const ex = zx - 0.5, ey = zy - 0.5;
-    const canX = Math.abs(ex) > TOL && hMoves < 4, canY = Math.abs(ey) > TOL && vMoves < 4;
-    if (!canX && !canY) break;
-    let moved = 0, bumped = false;
-    if (canX && (!canY || Math.abs(ex) >= Math.abs(ey))) {             // horizontal
-      const dir = (ex > 0) === (hFlip > 0) ? 'right' : 'left';
-      const m = await step(dir, clamp(220, 600, Math.abs(ex) * 900), hSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) { moved = Math.abs(m.fx); zx = clamp(0, 1, zx + m.fx); hMoves++; }
-      else if (Math.abs(m.fx) < 0.02 && hSp < 6) { hSp++; bumped = true; } // no venció el roce: más velocidad
-    } else {                                                            // vertical: bajar es suave, subir es pegajoso; el lazo corrige
-      const down = (ey > 0) === (vFlip > 0);
-      const dir = down ? (vFlip > 0 ? 'down' : 'up') : (vFlip > 0 ? 'up' : 'down');
-      const m = await step(dir, clamp(250, 520, 150 + Math.abs(ey) * 800), vSp); if (!m) break;
-      if (m.conf > CONF && axisOK(m, dir)) { moved = Math.abs(m.fy); zy = clamp(0, 1, zy + m.fy); vMoves++; }
-      else if (Math.abs(m.fy) < 0.02 && vSp < 6) { vSp++; bumped = true; } // no venció el roce: más velocidad
-    }
-    stall = (moved < 0.01 && !bumped) ? stall + 1 : 0;
-  }
-  acDebug.push({ phase: 'done', zx: +zx.toFixed(3), zy: +zy.toFixed(3) });
+  acDebug.push({ phase: 'done', px: +px.toFixed(3), py: +py.toFixed(3) });
 }
 $('#areaOptical').addEventListener('click', async () => {
   const cam = cameras[cur]; if (!cam || !cam.ptz || centering) return;
