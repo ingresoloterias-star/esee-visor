@@ -8,7 +8,7 @@ const path = require('path');
 const os = require('os');
 const { Kp2pClient, PTZ } = require('./lib/kp2p');
 const { Fmp4Muxer, TIMESCALE } = require('./lib/fmp4');
-const { RecSearch, replay, dvrNow } = require('./lib/recordings');
+const { RecSearch, replay, replayIdle, dvrNow } = require('./lib/recordings');
 const { buildZip } = require('./lib/zip');
 const crypto = require('crypto');
 
@@ -343,16 +343,29 @@ function createClipJob(chans, start, end, includeAudio = false) {
       const ch = chans[i];
       const file = multi ? path.join(os.tmpdir(), 'esee-part-' + id + '-' + ch + '.mp4') : job.file;
       let size = 0;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         if (job.cancelled) throw new Error('cancelado');
-        // Pausa entre cámaras (y antes de reintentar) para que el DVR libere la sesión de reproducción anterior.
+        // Antes de pedir el tramo, que el DVR haya soltado cualquier reproducción (medido: si se pide apenas se
+        // cortó la grabación que se estaba mirando, el DVR frena la sesión nueva a los ~3 s). Lo mismo entre
+        // cámaras y antes de reintentar.
+        await replayIdle();
         if (i > 0 || attempt > 0) await delay(2000);
-        await prepareClip(ch, start, end, includeAudio, file, (progress) => {
-          if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
-        }, (o) => { job.active = o; });
+        let partial = false;
+        try {
+          await prepareClip(ch, start, end, includeAudio, file, (progress) => {
+            if (job.status === 'preparing') job.progress = Math.min(99, Math.max(job.progress, Math.floor((i + (progress || 0) / 100) / n * 100)));
+          }, (o) => { job.active = o; });
+        } catch (e) {
+          if (job.cancelled || !e.partial) throw e;
+          partial = true;                          // el DVR se frenó/cortó a mitad del tramo
+        }
         job.active = null;
-        size = fs.statSync(file).size;
-        if (size >= 1000) break;
+        size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+        if (!partial && size >= 1000) break;
+        if (partial && attempt === 2) {             // tercer intento igual de corto: ahí termina la grabación
+          if (size >= 1000) { log(`descarga: cámara ${ch + 1}: la grabación termina antes del final del tramo; se entrega lo que hay`); break; }
+          throw new Error('El DVR cortó el video antes de terminar; probá de nuevo');
+        }
       }
       if (size < 1000) throw new Error(multi ? `La cámara ${ch + 1} no tiene video en ese tramo` : 'No se encontró video en el tramo elegido');
       if (multi) parts.push({ path: file, name: clipFileName(ch) });
