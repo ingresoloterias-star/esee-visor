@@ -278,6 +278,7 @@
     <div id="clipBusyText">Preparando…</div>
     <progress id="clipBusyProgress" max="100" value="0"></progress>
     <p id="clipBusyHint">Dejá esta pantalla abierta: el DVR está preparando el video y conviene no pedirle otra cosa mientras tanto.</p>
+    <button class="btn on" id="clipBusySave" style="display:none">Guardar</button>
     <button class="btn sm" id="clipBusyCancel">Cancelar</button>
   </section>
 </div>
@@ -1451,6 +1452,29 @@ function clipCancel() {
   if (clipAbort) { clipAbort.abort(); clipAbort = null; }
   if (clipJobId) { fetch('/api/rec/export/cancel?id=' + encodeURIComponent(clipJobId), { method: 'POST' }).catch(() => {}); clipJobId = null; }
 }
+// iPhone/iPad: muestra "Guardar" y, al tocarlo, abre la hoja de Compartir con el archivo (iOS exige un toque
+// para abrirla). Si se cierra la hoja sin elegir nada, se puede volver a tocar. Devuelve true si se compartió.
+function clipSaveByShare(file, signal, mb) {
+  const save = $('#clipBusySave'), cancel = $('#clipBusyCancel'), hint = $('#clipBusyHint');
+  const oldHint = hint.textContent, oldCancel = cancel.textContent;
+  $('#clipBusyText').textContent = `Video listo (${mb} MB)`;
+  $('#clipBusyProgress').value = 100;
+  hint.textContent = file.type === 'video/mp4' ? 'Tocá Guardar y elegí "Guardar video" (queda en Fotos) o "Guardar en Archivos".' : 'Tocá Guardar y elegí "Guardar en Archivos".';
+  save.style.display = ''; cancel.textContent = 'Cerrar';
+  return new Promise((resolve, reject) => {
+    const end = () => { save.style.display = 'none'; save.onclick = null; hint.textContent = oldHint; cancel.textContent = oldCancel; };
+    signal.addEventListener('abort', () => { end(); reject(new DOMException('cancelado', 'AbortError')); }, { once: true });
+    save.onclick = async () => {
+      try { await navigator.share({ files: [file] }); end(); resolve(true); }
+      catch (e) {
+        if (e && e.name === 'AbortError') return;          // cerró la hoja sin elegir: puede volver a tocar Guardar
+        const u = URL.createObjectURL(file), a = document.createElement('a');   // otro error: probar con un enlace común
+        a.href = u; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000);
+        end(); resolve(false);
+      }
+    };
+  });
+}
 
 async function clipDownload(chans) {
   if ($('#clipDownload').disabled || clipAbort) return;
@@ -1485,24 +1509,38 @@ async function clipDownload(chans) {
     $('#clipBusyText').textContent = 'Descargando… 0%'; progress.value = 0;
     const response = await fetch('/api/rec/export/file?id=' + encodeURIComponent(id), { cache: 'no-store', signal: ac.signal });
     if (!response.ok) { let message = 'No se pudo descargar el video'; try { message = (await response.json()).error || message; } catch {} throw new Error(message); }
-    const total = Number(response.headers.get('Content-Length'));
-    if (!total || !response.body) throw new Error('El servidor no informó el tamaño del video');
+    // El tamaño sirve sólo para el porcentaje: si no llega (p. ej. entrando por un proxy como Tailscale), se descarga igual.
+    const total = Number(response.headers.get('Content-Length')) || 0;
+    if (!response.body) throw new Error('No se pudo descargar el video');
     const reader = response.body.getReader(), chunks = []; let loaded = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value); loaded += value.byteLength;
-      const percent = Math.min(100, Math.floor(loaded / total * 100));
-      progress.value = percent; $('#clipBusyText').textContent = `Descargando… ${percent}% (${(loaded / 1048576).toFixed(1)} MB)`;
+      const mb = (loaded / 1048576).toFixed(1);
+      if (total) { const percent = Math.min(100, Math.floor(loaded / total * 100)); progress.value = percent; $('#clipBusyText').textContent = `Descargando… ${percent}% (${mb} MB)`; }
+      else $('#clipBusyText').textContent = `Descargando… ${mb} MB`;
     }
+    if (total && loaded < total) throw new Error('La descarga se cortó; probá de nuevo');
     if (!loaded) throw new Error('No se encontró video en ese tramo');
     const stamp = dayKey(rec.clipStart) + '-' + hms(rec.clipStart).replaceAll(':', '-');
     const type = multi ? 'application/zip' : 'video/mp4';
     const fileName = multi ? `grabacion-${stamp}-${chans.length}camaras.zip` : `camara-${chans[0] + 1}-${stamp}${withAudio ? '-audio' : ''}.mp4`;
-    const blob = new Blob(chunks, { type }), objectUrl = URL.createObjectURL(blob), a = document.createElement('a');
+    const blob = new Blob(chunks, { type });
+    clipJobId = null;
+    // iPhone/iPad: como app de inicio, iOS no guarda archivos bajados con un enlace de descarga. Ahí se usa la
+    // hoja de Compartir ("Guardar video" va a Fotos; "Guardar en Archivos" también sirve para el ZIP). Necesita
+    // un toque del usuario, por eso se muestra el botón Guardar.
+    const file = typeof File === 'function' ? new File([blob], fileName, { type }) : null;
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (ios && file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      const saved = await clipSaveByShare(file, ac.signal, (loaded / 1048576).toFixed(1));
+      status.textContent = saved ? 'Listo · 100%' : 'Descarga lista';
+      return;
+    }
+    const objectUrl = URL.createObjectURL(blob), a = document.createElement('a');
     a.href = objectUrl; a.download = fileName;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
-    clipJobId = null;
     status.textContent = 'Descarga lista · 100%';
   } catch (e) {
     if (e.name === 'AbortError') { clipCancel(); status.textContent = 'Descarga cancelada'; }
